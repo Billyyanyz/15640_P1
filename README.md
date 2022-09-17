@@ -1,6 +1,8 @@
 p1
 ==
 
+This is Project 1 implementation by Yunzhou (Billy) Yan and Kaiwen (Kevin) Xue.
+
 This repository contains the starter code for project 1 (15-440, Fall 2022). It also contains
 the tests that we will use to grade your implementation, and two simple echo server/client
 (`srunner` and `crunner`, respectively) programs that you might find useful for your own testing
