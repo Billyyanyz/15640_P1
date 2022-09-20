@@ -125,8 +125,8 @@ func (c *client) ConnID() int {
 
 func (c *client) Read() ([]byte, error) {
 	c.startReading <- struct{}{}
-	me := <-c.readPayload
-	return me.payload, me.err
+	pe := <-c.readPayload
+	return pe.payload, pe.err
 }
 
 func (c *client) Write(payload []byte) error {
