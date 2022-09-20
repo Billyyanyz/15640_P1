@@ -15,15 +15,19 @@ type server struct {
 	clientsID   map[int]*clientInfo
 	clientsAddr map[string]*clientInfo
 	clientsCnt  int
+	closed      bool
+
+	newClientConnecting chan *messageWithAddress
+	newAck              chan Message
+	newCAck             chan Message
+	newDataReceiving    chan Message
+
+	readFunctionReady chan Message
+	closeClient       chan int
+	closeClientRes    chan bool
 
 	stopConnectionRoutine chan struct{}
 	stopMainRoutine       chan struct{}
-	newClientConnecting   chan *messageWithAddress
-	newAck                chan Message
-	newCAck               chan Message
-	newDataReceiving      chan Message
-
-	readFunctionReady chan Message
 }
 
 type messageWithAddress struct {
@@ -36,6 +40,8 @@ type clientInfo struct {
 	addr   string
 
 	sn int
+
+	closed bool
 }
 
 func newClientInfo(connID int, addr string, sn int) *clientInfo {
@@ -44,6 +50,8 @@ func newClientInfo(connID int, addr string, sn int) *clientInfo {
 		addr:   addr,
 
 		sn: sn,
+
+		closed: false,
 	}
 
 }
@@ -60,13 +68,14 @@ func NewServer(port int, params *Params) (Server, error) {
 		clientsID:             make(map[int]*clientInfo),
 		clientsAddr:           make(map[string]*clientInfo),
 		clientsCnt:            0,
-		stopConnectionRoutine: make(chan struct{}),
-		stopMainRoutine:       make(chan struct{}),
+		closed:                false,
 		newClientConnecting:   make(chan *messageWithAddress),
 		newAck:                make(chan Message),
 		newCAck:               make(chan Message),
 		newDataReceiving:      make(chan Message),
 		readFunctionReady:     make(chan Message),
+		stopConnectionRoutine: make(chan struct{}),
+		stopMainRoutine:       make(chan struct{}),
 	}
 	var addr *lspnet.UDPAddr
 	var err error
@@ -115,6 +124,7 @@ func (s *server) MainRoutine() {
 	for {
 		select {
 		case <-s.stopMainRoutine:
+			s.closed = true
 			return
 		case mwa := <-s.newClientConnecting:
 			if _, ok := s.clientsAddr[mwa.addr.String()]; !ok {
@@ -139,17 +149,26 @@ func (s *server) MainRoutine() {
 			}
 			//cInfo := s.clientsID[message.ConnID]
 			// sliding window check and recv
+			// store message in buffer, when read calls, return only the lowest possible one
+			// lowest possible one uses size1 buffer to mark readiness
 			// write back Ack
-			s.readFunctionReady <- message
+		case id := <-s.closeClient:
+			if _, ok := s.clientsID[id]; !ok {
+				s.closeClientRes <- false
+			} else {
+				s.clientsID[id].closed = true
+				s.closeClientRes <- true
+			}
 		}
 	}
 }
 
 func (s *server) Read() (int, []byte, error) {
-	select {
-	case message := <-s.readFunctionReady:
-		return message.ConnID, message.Payload, nil
-	}
+	// send read request to main
+	// main check if server closed, client closed, etc.
+	// if not, return a signal to this function containing the info
+	// see closeConn for template, send things to mainRoutine, then wait for results to get error
+	return -1, nil, nil
 }
 
 func (s *server) Write(connId int, payload []byte) error {
@@ -157,11 +176,18 @@ func (s *server) Write(connId int, payload []byte) error {
 }
 
 func (s *server) CloseConn(connId int) error {
-	return errors.New("not yet implemented")
+	s.closeClient <- connId
+	res := <-s.closeClientRes
+	if !res {
+		return errors.New("client ID does not exist")
+	}
+	return nil
 }
 
 func (s *server) Close() error {
-	s.stopMainRoutine <- struct{}{}
+	// but how to block until pending messages?
+	// wait until a signal send to close marking all message solved
 	s.stopConnectionRoutine <- struct{}{}
-	return errors.New("not yet implemented")
+	s.stopMainRoutine <- struct{}{}
+	return nil
 }
