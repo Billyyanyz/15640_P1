@@ -10,15 +10,20 @@ import (
 )
 
 type server struct {
+	params      *Params
 	udpConn     *lspnet.UDPConn
 	clientsID   map[int]*clientInfo
 	clientsAddr map[string]*clientInfo
 	clientsCnt  int
 
-	stopConnectionRoutine chan bool
-	stopMainRoutine       chan bool
-	newClientConnecting   chan messageWithAddress
-	newAck                chan messageWithAddress
+	stopConnectionRoutine chan struct{}
+	stopMainRoutine       chan struct{}
+	newClientConnecting   chan *messageWithAddress
+	newAck                chan Message
+	newCAck               chan Message
+	newDataReceiving      chan Message
+
+	readFunctionReady chan Message
 }
 
 type messageWithAddress struct {
@@ -29,12 +34,16 @@ type messageWithAddress struct {
 type clientInfo struct {
 	connID int
 	addr   string
+
+	sn int
 }
 
-func newClientInfo(connID int, addr string) *clientInfo {
+func newClientInfo(connID int, addr string, sn int) *clientInfo {
 	return &clientInfo{
 		connID: connID,
 		addr:   addr,
+
+		sn: sn,
 	}
 
 }
@@ -47,25 +56,31 @@ func newClientInfo(connID int, addr string) *clientInfo {
 // there was an error resolving or listening on the specified port number.
 func NewServer(port int, params *Params) (Server, error) {
 	s := &server{
+		params:                params,
 		clientsID:             make(map[int]*clientInfo),
 		clientsAddr:           make(map[string]*clientInfo),
 		clientsCnt:            0,
-		stopConnectionRoutine: make(chan bool),
-		stopMainRoutine:       make(chan bool),
-		newClientConnecting:   make(chan messageWithAddress),
+		stopConnectionRoutine: make(chan struct{}),
+		stopMainRoutine:       make(chan struct{}),
+		newClientConnecting:   make(chan *messageWithAddress),
+		newAck:                make(chan Message),
+		newCAck:               make(chan Message),
+		newDataReceiving:      make(chan Message),
+		readFunctionReady:     make(chan Message),
 	}
-	if addr, err := lspnet.ResolveUDPAddr("udp",
+	var addr *lspnet.UDPAddr
+	var err error
+	if addr, err = lspnet.ResolveUDPAddr("udp",
 		lspnet.JoinHostPort("localhost", strconv.Itoa(port))); err != nil {
 		return nil, err
-	} else {
-		if conn, err := lspnet.ListenUDP("udp", addr); err != nil {
-			return nil, err
-		} else {
-			s.udpConn = conn
-			go s.connectionRoutine()
-			go s.MainRoutine()
-		}
 	}
+	var conn *lspnet.UDPConn
+	if conn, err = lspnet.ListenUDP("udp", addr); err != nil {
+		return nil, err
+	}
+	s.udpConn = conn
+	go s.connectionRoutine()
+	go s.MainRoutine()
 	return s, nil
 }
 
@@ -78,23 +93,20 @@ func (s *server) connectionRoutine() {
 			var b []byte
 			if _, addr, err := s.udpConn.ReadFromUDP(b); err != nil {
 				return
-			} else {
-				var message Message
-				if err := json.Unmarshal(b, &message); err != nil {
-				} else {
-					switch message.Type {
-					case MsgConnect:
-						s.newClientConnecting <- messageWithAddress{message, addr}
-					case MsgAck:
-						s.newAck <- messageWithAddress{message, addr}
-					case MsgCAck:
-
-					case MsgData:
-					}
-				}
-
 			}
-
+			var message Message
+			if err := json.Unmarshal(b, &message); err != nil {
+			}
+			switch message.Type {
+			case MsgConnect:
+				s.newClientConnecting <- &messageWithAddress{message, addr}
+			case MsgAck:
+				s.newAck <- message
+			case MsgCAck:
+				s.newCAck <- message
+			case MsgData:
+				s.newDataReceiving <- message
+			}
 		}
 	}
 }
@@ -107,20 +119,37 @@ func (s *server) MainRoutine() {
 		case mwa := <-s.newClientConnecting:
 			if _, ok := s.clientsAddr[mwa.addr.String()]; !ok {
 				s.clientsCnt++
-				s.clientsID[s.clientsCnt] = newClientInfo(s.clientsCnt, mwa.addr.String())
+				s.clientsID[s.clientsCnt] = newClientInfo(s.clientsCnt, mwa.addr.String(), mwa.message.SeqNum)
 				s.clientsAddr[mwa.addr.String()] = s.clientsID[s.clientsCnt]
 			}
 			// write back Ack
 		case mwa := <-s.newAck:
-
+			// do something with sliding window
+		case mwa := <-s.newCAck:
+			// do something with sliding window
+		case message := <-s.newDataReceiving:
+			if len(message.Payload) > message.Size {
+				continue
+			} else if len(message.Payload) < message.Size {
+				message.Payload = message.Payload[:message.Size]
+			}
+			if CalculateChecksum(message.ConnID, message.SeqNum, message.Size, message.Payload) !=
+				message.Checksum {
+				continue
+			}
+			//cInfo := s.clientsID[message.ConnID]
+			// sliding window check and recv
+			// write back Ack
+			s.readFunctionReady <- message
 		}
 	}
 }
 
 func (s *server) Read() (int, []byte, error) {
-	// TODO: remove this line when you are ready to begin implementing this method.
-	select {} // Blocks indefinitely.
-	return -1, nil, errors.New("not yet implemented")
+	select {
+	case message := <-s.readFunctionReady:
+		return message.ConnID, message.Payload, nil
+	}
 }
 
 func (s *server) Write(connId int, payload []byte) error {
@@ -132,7 +161,7 @@ func (s *server) CloseConn(connId int) error {
 }
 
 func (s *server) Close() error {
-	s.stopMainRoutine <- true
-	s.stopConnectionRoutine <- true
+	s.stopMainRoutine <- struct{}{}
+	s.stopConnectionRoutine <- struct{}{}
 	return errors.New("not yet implemented")
 }
