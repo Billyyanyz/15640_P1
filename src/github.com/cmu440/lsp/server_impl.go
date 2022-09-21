@@ -149,6 +149,10 @@ func (s *server) MainRoutine() {
 		case message := <-s.newCAck:
 			// do something with sliding window
 		case message := <-s.newDataReceiving:
+			cInfo := s.clientsID[message.ConnID]
+			if cInfo.closed {
+				continue
+			}
 			if len(message.Payload) > message.Size {
 				continue
 			} else if len(message.Payload) < message.Size {
@@ -158,7 +162,6 @@ func (s *server) MainRoutine() {
 				message.Checksum {
 				continue
 			}
-			cInfo := s.clientsID[message.ConnID]
 			cInfo.buffRecv.recvMsg(message)
 			// write back Ack
 		case <-s.readFunctionCall:
@@ -166,10 +169,9 @@ func (s *server) MainRoutine() {
 				s.readFunctionCallRes <- messageWithID{nil, -1}
 				continue
 			}
-			// if client close?
 			for cID := range s.clientsID {
 				cInfo := s.clientsID[cID]
-				if cInfo.buffRecv.readyToRead() {
+				if !cInfo.closed && cInfo.buffRecv.readyToRead() {
 					readRes := messageWithID{cInfo.buffRecv.deliverToRead(), cID}
 					s.readFunctionCallRes <- readRes
 				}
@@ -180,6 +182,9 @@ func (s *server) MainRoutine() {
 				s.closeClientRes <- false
 			} else {
 				s.clientsID[id].closed = true
+				go func() {
+					s.readFunctionCallRes <- messageWithID{nil, id}
+				}()
 				s.closeClientRes <- true
 			}
 			// also notify read function this!
@@ -192,6 +197,9 @@ func (s *server) Read() (int, []byte, error) {
 	res := <-s.readFunctionCallRes
 	if res.id == -1 {
 		return -1, nil, errors.New("Server is closed")
+	}
+	if res.message == nil {
+		return -1, nil, errors.New("client connection is closed")
 	}
 	return res.id, res.message.Payload, nil
 }
