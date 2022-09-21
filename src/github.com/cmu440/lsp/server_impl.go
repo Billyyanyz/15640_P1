@@ -1,4 +1,4 @@
-// Contains the implementation of a LSP server.
+// Contains the implementation of an LSP server.
 
 package lsp
 
@@ -17,39 +17,45 @@ type server struct {
 	clientsCnt  int
 	closed      bool
 
-	newClientConnecting chan *messageWithAddress
-	newAck              chan Message
-	newCAck             chan Message
-	newDataReceiving    chan Message
+	newClientConnecting chan messageWithAddress
+	newAck              chan *Message
+	newCAck             chan *Message
+	newDataReceiving    chan *Message
 
-	readFunctionReady chan Message
-	closeClient       chan int
-	closeClientRes    chan bool
+	readFunctionCall    chan struct{}
+	readFunctionCallRes chan messageWithID
+	closeClient         chan int
+	closeClientRes      chan bool
 
 	stopConnectionRoutine chan struct{}
 	stopMainRoutine       chan struct{}
 }
 
 type messageWithAddress struct {
-	message Message
+	message *Message
 	addr    *lspnet.UDPAddr
+}
+
+type messageWithID struct {
+	message *Message
+	id      int
 }
 
 type clientInfo struct {
 	connID int
 	addr   string
 
-	sn int
+	window slidingWindowReceiver
 
 	closed bool
 }
 
-func newClientInfo(connID int, addr string, sn int) *clientInfo {
+func (s *server) newClientInfo(connID int, addr string, sn int) *clientInfo {
 	return &clientInfo{
 		connID: connID,
 		addr:   addr,
 
-		sn: sn,
+		window: newSlidingWindowReceiver(sn, s.params.WindowSize, s.params.MaxUnackedMessages),
 
 		closed: false,
 	}
@@ -69,11 +75,14 @@ func NewServer(port int, params *Params) (Server, error) {
 		clientsAddr:           make(map[string]*clientInfo),
 		clientsCnt:            0,
 		closed:                false,
-		newClientConnecting:   make(chan *messageWithAddress),
-		newAck:                make(chan Message),
-		newCAck:               make(chan Message),
-		newDataReceiving:      make(chan Message),
-		readFunctionReady:     make(chan Message),
+		newClientConnecting:   make(chan messageWithAddress),
+		newAck:                make(chan *Message),
+		newCAck:               make(chan *Message),
+		newDataReceiving:      make(chan *Message),
+		readFunctionCall:      make(chan struct{}),
+		readFunctionCallRes:   make(chan messageWithID),
+		closeClient:           make(chan int),
+		closeClientRes:        make(chan bool),
 		stopConnectionRoutine: make(chan struct{}),
 		stopMainRoutine:       make(chan struct{}),
 	}
@@ -99,22 +108,24 @@ func (s *server) connectionRoutine() {
 		case <-s.stopConnectionRoutine:
 			return
 		default:
+			var addr *lspnet.UDPAddr
+			var err error
 			var b []byte
-			if _, addr, err := s.udpConn.ReadFromUDP(b); err != nil {
+			if _, addr, err = s.udpConn.ReadFromUDP(b); err != nil {
 				return
 			}
 			var message Message
-			if err := json.Unmarshal(b, &message); err != nil {
+			if err = json.Unmarshal(b, &message); err != nil {
 			}
 			switch message.Type {
 			case MsgConnect:
-				s.newClientConnecting <- &messageWithAddress{message, addr}
+				s.newClientConnecting <- messageWithAddress{&message, addr}
 			case MsgAck:
-				s.newAck <- message
+				s.newAck <- &message
 			case MsgCAck:
-				s.newCAck <- message
+				s.newCAck <- &message
 			case MsgData:
-				s.newDataReceiving <- message
+				s.newDataReceiving <- &message
 			}
 		}
 	}
@@ -129,13 +140,13 @@ func (s *server) MainRoutine() {
 		case mwa := <-s.newClientConnecting:
 			if _, ok := s.clientsAddr[mwa.addr.String()]; !ok {
 				s.clientsCnt++
-				s.clientsID[s.clientsCnt] = newClientInfo(s.clientsCnt, mwa.addr.String(), mwa.message.SeqNum)
+				s.clientsID[s.clientsCnt] = s.newClientInfo(s.clientsCnt, mwa.addr.String(), mwa.message.SeqNum)
 				s.clientsAddr[mwa.addr.String()] = s.clientsID[s.clientsCnt]
 			}
 			// write back Ack
-		case mwa := <-s.newAck:
+		case message := <-s.newAck:
 			// do something with sliding window
-		case mwa := <-s.newCAck:
+		case message := <-s.newCAck:
 			// do something with sliding window
 		case message := <-s.newDataReceiving:
 			if len(message.Payload) > message.Size {
@@ -147,11 +158,20 @@ func (s *server) MainRoutine() {
 				message.Checksum {
 				continue
 			}
-			//cInfo := s.clientsID[message.ConnID]
-			// sliding window check and recv
-			// store message in buffer, when read calls, return only the lowest possible one
+			cInfo := s.clientsID[message.ConnID]
+			if cInfo.window.outsideWindow(message) {
+				continue
+			}
+			cInfo.window.recvMsg(message)
+
+			// when read calls, return only the lowest possible one
 			// lowest possible one uses size1 buffer to mark readiness
 			// write back Ack
+		case <-s.readFunctionCall:
+			if s.closed {
+				s.readFunctionCallRes <- messageWithID{nil, -1}
+			}
+
 		case id := <-s.closeClient:
 			if _, ok := s.clientsID[id]; !ok {
 				s.closeClientRes <- false
@@ -159,13 +179,19 @@ func (s *server) MainRoutine() {
 				s.clientsID[id].closed = true
 				s.closeClientRes <- true
 			}
+			// also notify read function this!
 		}
 	}
 }
 
 func (s *server) Read() (int, []byte, error) {
+	s.readFunctionCall <- struct{}{}
+	res := <-s.readFunctionCallRes
+	if res.id == -1 {
+		return -1, nil, errors.New("Server is closed")
+	}
 	// send read request to main
-	// main check if server closed, client closed, etc.
+	// then main check if server closed, client closed, etc.
 	// if not, return a signal to this function containing the info
 	// see closeConn for template, send things to mainRoutine, then wait for results to get error
 	return -1, nil, nil
