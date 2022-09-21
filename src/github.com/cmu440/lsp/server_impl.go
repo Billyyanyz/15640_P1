@@ -23,7 +23,8 @@ type server struct {
 	newDataReceiving    chan *Message
 
 	readFunctionCall    chan struct{}
-	readFunctionCallRes chan messageWithID
+	readFunctionCallRes chan messageWithErrID
+	writeFunctionCall   chan *Message
 	closeClient         chan int
 	closeClientRes      chan bool
 
@@ -36,21 +37,21 @@ type messageWithAddress struct {
 	addr    *lspnet.UDPAddr
 }
 
-type messageWithID struct {
+type messageWithErrID struct {
 	message *Message
-	id      int
+	err_id  int
 }
 
 type clientInfo struct {
 	connID int
-	addr   string
+	addr   *lspnet.UDPAddr
 
 	buffRecv bufferedReceiver
 
 	closed bool
 }
 
-func (s *server) newClientInfo(connID int, addr string, sn int) *clientInfo {
+func (s *server) newClientInfo(connID int, addr *lspnet.UDPAddr, sn int) *clientInfo {
 	return &clientInfo{
 		connID: connID,
 		addr:   addr,
@@ -80,7 +81,8 @@ func NewServer(port int, params *Params) (Server, error) {
 		newCAck:               make(chan *Message),
 		newDataReceiving:      make(chan *Message),
 		readFunctionCall:      make(chan struct{}),
-		readFunctionCallRes:   make(chan messageWithID),
+		readFunctionCallRes:   make(chan messageWithErrID),
+		writeFunctionCall:     make(chan *Message),
 		closeClient:           make(chan int),
 		closeClientRes:        make(chan bool),
 		stopConnectionRoutine: make(chan struct{}),
@@ -116,6 +118,7 @@ func (s *server) connectionRoutine() {
 			}
 			var message Message
 			if err = json.Unmarshal(b, &message); err != nil {
+				continue
 			}
 			switch message.Type {
 			case MsgConnect:
@@ -140,7 +143,7 @@ func (s *server) MainRoutine() {
 		case mwa := <-s.newClientConnecting:
 			if _, ok := s.clientsAddr[mwa.addr.String()]; !ok {
 				s.clientsCnt++
-				s.clientsID[s.clientsCnt] = s.newClientInfo(s.clientsCnt, mwa.addr.String(), mwa.message.SeqNum+1)
+				s.clientsID[s.clientsCnt] = s.newClientInfo(s.clientsCnt, mwa.addr, mwa.message.SeqNum+1)
 				s.clientsAddr[mwa.addr.String()] = s.clientsID[s.clientsCnt]
 			}
 			// write back Ack
@@ -166,15 +169,30 @@ func (s *server) MainRoutine() {
 			// write back Ack
 		case <-s.readFunctionCall:
 			if s.closed {
-				s.readFunctionCallRes <- messageWithID{nil, -1}
+				s.readFunctionCallRes <- messageWithErrID{nil, -1}
 				continue
 			}
 			for cID := range s.clientsID {
 				cInfo := s.clientsID[cID]
 				if !cInfo.closed && cInfo.buffRecv.readyToRead() {
-					readRes := messageWithID{cInfo.buffRecv.deliverToRead(), cID}
+					readRes := messageWithErrID{cInfo.buffRecv.deliverToRead(), 0}
 					s.readFunctionCallRes <- readRes
 				}
+			}
+		case m := <-s.writeFunctionCall:
+			m.Type = MsgData
+			//get sequence number
+			//m.SeqNum <-
+			//also check the window!
+			m.Size = len(m.Payload)
+			m.Checksum = CalculateChecksum(m.ConnID, m.SeqNum, m.Size, m.Payload)
+			var b []byte
+			var err error
+			if b, err = json.Marshal(m); err != nil {
+				continue
+			}
+			if _, err = s.udpConn.WriteToUDP(b, s.clientsID[m.ConnID].addr); err != nil {
+				continue
 			}
 
 		case id := <-s.closeClient:
@@ -183,7 +201,7 @@ func (s *server) MainRoutine() {
 			} else {
 				s.clientsID[id].closed = true
 				go func() {
-					s.readFunctionCallRes <- messageWithID{nil, id}
+					s.readFunctionCallRes <- messageWithErrID{&Message{ConnID: id}, -2}
 				}()
 				s.closeClientRes <- true
 			}
@@ -195,16 +213,20 @@ func (s *server) MainRoutine() {
 func (s *server) Read() (int, []byte, error) {
 	s.readFunctionCall <- struct{}{}
 	res := <-s.readFunctionCallRes
-	if res.id == -1 {
+	if res.err_id == -1 {
 		return -1, nil, errors.New("Server is closed")
 	}
-	if res.message == nil {
-		return -1, nil, errors.New("client connection is closed")
+	if res.err_id == -2 {
+		return -1, nil, errors.New("Connection with client id: " + strconv.Itoa(res.message.ConnID) + " is closed")
 	}
-	return res.id, res.message.Payload, nil
+	return res.message.ConnID, res.message.Payload, nil
 }
 
 func (s *server) Write(connId int, payload []byte) error {
+	var message Message
+	message.ConnID = connId
+	message.Payload = payload
+	s.writeFunctionCall <- &message
 	return errors.New("not yet implemented")
 }
 
