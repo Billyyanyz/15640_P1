@@ -45,7 +45,7 @@ type clientInfo struct {
 	connID int
 	addr   string
 
-	window slidingWindowReceiver
+	buffRecv bufferedReceiver
 
 	closed bool
 }
@@ -55,7 +55,7 @@ func (s *server) newClientInfo(connID int, addr string, sn int) *clientInfo {
 		connID: connID,
 		addr:   addr,
 
-		window: newSlidingWindowReceiver(sn, s.params.WindowSize, s.params.MaxUnackedMessages),
+		buffRecv: newBufferedReceiver(sn),
 
 		closed: false,
 	}
@@ -140,7 +140,7 @@ func (s *server) MainRoutine() {
 		case mwa := <-s.newClientConnecting:
 			if _, ok := s.clientsAddr[mwa.addr.String()]; !ok {
 				s.clientsCnt++
-				s.clientsID[s.clientsCnt] = s.newClientInfo(s.clientsCnt, mwa.addr.String(), mwa.message.SeqNum)
+				s.clientsID[s.clientsCnt] = s.newClientInfo(s.clientsCnt, mwa.addr.String(), mwa.message.SeqNum+1)
 				s.clientsAddr[mwa.addr.String()] = s.clientsID[s.clientsCnt]
 			}
 			// write back Ack
@@ -159,17 +159,20 @@ func (s *server) MainRoutine() {
 				continue
 			}
 			cInfo := s.clientsID[message.ConnID]
-			if cInfo.window.outsideWindow(message) {
-				continue
-			}
-			cInfo.window.recvMsg(message)
-
-			// when read calls, return only the lowest possible one
-			// lowest possible one uses size1 buffer to mark readiness
+			cInfo.buffRecv.recvMsg(message)
 			// write back Ack
 		case <-s.readFunctionCall:
 			if s.closed {
 				s.readFunctionCallRes <- messageWithID{nil, -1}
+				continue
+			}
+			// if client close?
+			for cID := range s.clientsID {
+				cInfo := s.clientsID[cID]
+				if cInfo.buffRecv.readyToRead() {
+					readRes := messageWithID{cInfo.buffRecv.deliverToRead(), cID}
+					s.readFunctionCallRes <- readRes
+				}
 			}
 
 		case id := <-s.closeClient:
@@ -190,11 +193,7 @@ func (s *server) Read() (int, []byte, error) {
 	if res.id == -1 {
 		return -1, nil, errors.New("Server is closed")
 	}
-	// send read request to main
-	// then main check if server closed, client closed, etc.
-	// if not, return a signal to this function containing the info
-	// see closeConn for template, send things to mainRoutine, then wait for results to get error
-	return -1, nil, nil
+	return res.id, res.message.Payload, nil
 }
 
 func (s *server) Write(connId int, payload []byte) error {
