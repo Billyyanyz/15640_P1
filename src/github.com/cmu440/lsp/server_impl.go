@@ -22,11 +22,12 @@ type server struct {
 	newCAck             chan *Message
 	newDataReceiving    chan *Message
 
-	readFunctionCall    chan struct{}
-	readFunctionCallRes chan messageWithErrID
-	writeFunctionCall   chan *Message
-	closeClient         chan int
-	closeClientRes      chan bool
+	readFunctionCall     chan struct{}
+	readFunctionCallRes  chan messageWithErrID
+	writeFunctionCall    chan *Message
+	writeFunctionCallRes chan bool
+	closeClient          chan int
+	closeClientRes       chan bool
 
 	stopConnectionRoutine chan struct{}
 	stopMainRoutine       chan struct{}
@@ -46,7 +47,8 @@ type clientInfo struct {
 	connID int
 	addr   *lspnet.UDPAddr
 
-	buffRecv bufferedReceiver
+	buffRecv  bufferedReceiver
+	slideSndr slidingWindowSender
 
 	closed bool
 }
@@ -56,7 +58,8 @@ func (s *server) newClientInfo(connID int, addr *lspnet.UDPAddr, sn int) *client
 		connID: connID,
 		addr:   addr,
 
-		buffRecv: newBufferedReceiver(sn),
+		buffRecv:  newBufferedReceiver(sn),
+		slideSndr: newSlidingWindowSender(sn, s.params.WindowSize, s.params.MaxUnackedMessages),
 
 		closed: false,
 	}
@@ -148,9 +151,11 @@ func (s *server) MainRoutine() {
 			}
 			// write back Ack
 		case message := <-s.newAck:
-			// do something with sliding window
+			cInfo := s.clientsID[message.ConnID]
+			cInfo.slideSndr.ackMessage(message.SeqNum)
 		case message := <-s.newCAck:
-			// do something with sliding window
+			cInfo := s.clientsID[message.ConnID]
+			cInfo.slideSndr.cackMessage(message.SeqNum)
 		case message := <-s.newDataReceiving:
 			cInfo := s.clientsID[message.ConnID]
 			if cInfo.closed {
@@ -180,12 +185,17 @@ func (s *server) MainRoutine() {
 				}
 			}
 		case m := <-s.writeFunctionCall:
+			if _, ok := s.clientsID[m.ConnID]; !ok {
+				s.writeFunctionCallRes <- false
+			}
+			cInfo := s.clientsID[m.ConnID]
+			if m.SeqNum = cInfo.slideSndr.currentSN; m.SeqNum == -1 {
+				continue
+			}
 			m.Type = MsgData
-			//get sequence number
-			//m.SeqNum <-
-			//also check the window!
 			m.Size = len(m.Payload)
 			m.Checksum = CalculateChecksum(m.ConnID, m.SeqNum, m.Size, m.Payload)
+			cInfo.slideSndr.backupMsg(m)
 			var b []byte
 			var err error
 			if b, err = json.Marshal(m); err != nil {
@@ -194,6 +204,7 @@ func (s *server) MainRoutine() {
 			if _, err = s.udpConn.WriteToUDP(b, s.clientsID[m.ConnID].addr); err != nil {
 				continue
 			}
+			//do something to wait for an ack
 
 		case id := <-s.closeClient:
 			if _, ok := s.clientsID[id]; !ok {
@@ -205,7 +216,6 @@ func (s *server) MainRoutine() {
 				}()
 				s.closeClientRes <- true
 			}
-			// also notify read function this!
 		}
 	}
 }
@@ -227,7 +237,7 @@ func (s *server) Write(connId int, payload []byte) error {
 	message.ConnID = connId
 	message.Payload = payload
 	s.writeFunctionCall <- &message
-	return errors.New("not yet implemented")
+	return nil
 }
 
 func (s *server) CloseConn(connId int) error {

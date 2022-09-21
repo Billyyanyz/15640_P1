@@ -2,47 +2,50 @@ package lsp
 
 // change to sending window!!!
 
-type slidingWindowReceiver struct {
-	l           int
-	readsn      int
-	size        int
-	data        map[int]*Message
-	maxUnackMsg int
+type slidingWindowSender struct {
+	l             int
+	currentSN     int
+	size          int
+	data          map[int]*Message
+	maxUnackedMsg int
 }
 
-func newSlidingWindowReceiver(sn int, windowSize int, maxUnackMsg int) slidingWindowReceiver {
-	s := slidingWindowReceiver{
-		l:           sn,
-		readsn:      sn,
-		size:        windowSize,
-		data:        make(map[int]*Message),
-		maxUnackMsg: maxUnackMsg,
+func newSlidingWindowSender(sn int, windowSize int, maxUnackedMsg int) slidingWindowSender {
+	s := slidingWindowSender{
+		l:             sn,
+		currentSN:     sn,
+		size:          windowSize,
+		data:          make(map[int]*Message),
+		maxUnackedMsg: maxUnackedMsg,
 	}
 	return s
 }
 
-func (w *slidingWindowReceiver) outsideWindow(m *Message) bool {
-	return m.SeqNum >= w.l+w.size
+func (w *slidingWindowSender) getSeriesNum() int {
+	if len(w.data) >= w.maxUnackedMsg {
+		return -1
+	}
+	if w.currentSN >= w.l+w.size {
+		return -1
+	}
+	w.currentSN++
+	return w.currentSN - 1
 }
 
-func (w *slidingWindowReceiver) recvMsg(m *Message) {
+func (w *slidingWindowSender) backupMsg(m *Message) {
 	w.data[m.SeqNum] = m
-	for i := w.l; i < w.l+w.size; i++ {
-		if _, ok := w.data[i]; !ok {
-			w.l = i
-			break
-		}
+}
+
+func (w *slidingWindowSender) ackMessage(sn int) {
+	delete(w.data, sn)
+	if sn == w.l {
+		w.l++
 	}
 }
 
-func (w *slidingWindowReceiver) readyToRead() bool {
-	_, ok := w.data[w.readsn]
-	return ok
-}
-
-func (w *slidingWindowReceiver) deliverToRead() (m *Message) {
-	m = w.data[w.readsn]
-	delete(w.data, w.readsn)
-	w.readsn++
-	return m
+func (w *slidingWindowSender) cackMessage(sn int) {
+	for i := w.l; i <= sn; i++ {
+		delete(w.data, i)
+	}
+	w.l = sn + 1
 }
