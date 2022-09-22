@@ -12,8 +12,8 @@ type slidingWindowSender struct {
 
 func newSlidingWindowSender(sn int, windowSize int, maxUnackedMsg int) slidingWindowSender {
 	s := slidingWindowSender{
-		l:             sn,
-		currentSN:     sn,
+		l:             sn + 1,
+		currentSN:     sn + 1,
 		size:          windowSize,
 		data:          make(map[int]*Message),
 		maxUnackedMsg: maxUnackedMsg,
@@ -31,7 +31,7 @@ func (w *slidingWindowSender) readyToSend() bool {
 	return true
 }
 
-func (w *slidingWindowSender) getSeriesNum() int {
+func (w *slidingWindowSender) getSeqNum() int {
 	res := w.currentSN
 	w.currentSN++
 	return res
