@@ -161,6 +161,7 @@ func (s *server) MainRoutine() {
 		case mwa := <-s.newClientConnecting:
 			if _, ok := s.clientsAddr[mwa.addr.String()]; !ok {
 				s.clientsCnt++
+
 				s.clientsID[s.clientsCnt] = s.newClientInfo(s.clientsCnt, mwa.addr, mwa.message.SeqNum) // TODO: Double check seq num
 				clientInfo := s.clientsID[s.clientsCnt]
 				s.clientsAddr[mwa.addr.String()] = clientInfo
