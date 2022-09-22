@@ -5,12 +5,15 @@ package lsp
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/cmu440/lspnet"
 )
 
 type client struct {
 	connID  int
+	readSeqNum int
+	writeSeqNum int
 	udpConn *lspnet.UDPConn
 	// Signals
 	stopMainRoutine   chan struct{}
@@ -45,7 +48,6 @@ type MessageError struct {
 // hostport is a colon-separated string identifying the server's host address
 // and port number (i.e., "localhost:9999").
 func NewClient(hostport string, initialSeqNum int, params *Params) (Client, error) {
-	return nil, errors.New("not yet implemented")
 	addr, err := lspnet.ResolveUDPAddr("udp", hostport)
 	if err != nil {
 		return nil, err
@@ -57,6 +59,8 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 
 	c := &client{
 		connID:            0,
+		readSeqNum:        0,
+		writeSeqNum:       0,
 		udpConn:           conn,
 		stopMainRoutine:   make(chan struct{}),
 		stopReadRoutine:   make(chan struct{}),
@@ -68,6 +72,14 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 
 	go c.MainRoutine()
 	go c.ReadRoutine()
+
+	connectMsg := NewConnect(c.writeSeqNum)
+	connectRawMsg, err := json.Marshal(connectMsg)
+	if err != nil {
+		return nil, err
+	}
+	_, err = c.udpConn.Write(connectRawMsg)
+	
 	<-c.connectionSuccess
 
 	return c, nil
@@ -81,6 +93,7 @@ func (c *client) MainRoutine() {
 		case me := <-c.readMessage:
 			message := me.message
 			err := me.err
+			fmt.Printf("%s\n", &message)
 			if err != nil {
 				c.readPayload <- PayloadError{
 					message.Payload,
