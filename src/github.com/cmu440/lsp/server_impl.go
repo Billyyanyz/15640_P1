@@ -43,9 +43,18 @@ type messageWithAddress struct {
 	addr    *lspnet.UDPAddr
 }
 
+type readErr int
+
+const (
+	errServerClosed readErr = iota
+	errClientClosed
+	errClientDisconnected
+	errNil
+)
+
 type messageWithErrID struct {
 	message *Message
-	err_id  int
+	err_id  readErr
 }
 
 type clientInfo struct {
@@ -161,20 +170,15 @@ func (s *server) MainRoutine() {
 		case mwa := <-s.newClientConnecting:
 			if _, ok := s.clientsAddr[mwa.addr.String()]; !ok {
 				s.clientsCnt++
-
-				s.clientsID[s.clientsCnt] = s.newClientInfo(s.clientsCnt, mwa.addr, mwa.message.SeqNum) // TODO: Double check seq num
-				clientInfo := s.clientsID[s.clientsCnt]
-				s.clientsAddr[mwa.addr.String()] = clientInfo
-				connectAck := NewAck(clientInfo.connID, mwa.message.SeqNum)
-				fmt.Printf("Send: " + connectAck.String() + "\n")
-				connectAckRaw, err := json.Marshal(connectAck)
-				if err != nil {
-					fmt.Printf("Fucked up\n")
-					continue
-				}
-				s.udpConn.WriteToUDP(connectAckRaw, mwa.addr)
+				s.clientsID[s.clientsCnt] = s.newClientInfo(s.clientsCnt, mwa.addr, mwa.message.SeqNum)
+				cInfo := s.clientsID[s.clientsCnt]
+				s.clientsAddr[mwa.addr.String()] = cInfo
+				retMessage := NewAck(cInfo.connID, mwa.message.SeqNum)
+				go func() {
+					s.attemptWriting <- cInfo.connID
+					s.pendingMessages[cInfo.connID] <- retMessage
+				}()
 			}
-			// write back Ack
 		case message := <-s.newAck:
 			cInfo := s.clientsID[message.ConnID]
 			cInfo.slideSndr.ackMessage(message.SeqNum)
@@ -206,23 +210,20 @@ func (s *server) MainRoutine() {
 				continue
 			}
 			cInfo.buffRecv.recvMsg(message)
-			var retMessage Message
-			retMessage.Type = MsgAck
-			retMessage.ConnID = message.ConnID
-			retMessage.SeqNum = message.SeqNum
+			retMessage := NewAck(message.ConnID, message.SeqNum)
 			go func() {
 				s.attemptWriting <- message.ConnID
-				s.pendingMessages[message.ConnID] <- &retMessage
+				s.pendingMessages[message.ConnID] <- retMessage
 			}()
 		case <-s.readFunctionCall:
 			if s.serverClosed {
-				s.readFunctionCallRes <- messageWithErrID{nil, -1}
+				s.readFunctionCallRes <- messageWithErrID{nil, errServerClosed}
 				continue
 			}
 			for cID := range s.clientsID {
 				cInfo := s.clientsID[cID]
 				if !cInfo.closed && cInfo.buffRecv.readyToRead() {
-					readRes := messageWithErrID{cInfo.buffRecv.deliverToRead(), 0}
+					readRes := messageWithErrID{cInfo.buffRecv.deliverToRead(), errNil}
 					s.readFunctionCallRes <- readRes
 				}
 			}
@@ -237,7 +238,7 @@ func (s *server) MainRoutine() {
 					}()
 					continue
 				}
-				message.SeqNum = cInfo.slideSndr.getSeriesNum()
+				message.SeqNum = cInfo.slideSndr.getSeqNum()
 				message.Size = len(message.Payload)
 				message.Checksum = CalculateChecksum(id, message.SeqNum, message.Size, message.Payload)
 			}
@@ -248,7 +249,7 @@ func (s *server) MainRoutine() {
 		case id := <-s.closeClient:
 			s.clientsID[id].closed = true
 			go func() {
-				s.readFunctionCallRes <- messageWithErrID{&Message{ConnID: id}, -2}
+				s.readFunctionCallRes <- messageWithErrID{&Message{ConnID: id}, errClientClosed}
 			}()
 		case <-s.attemptClosing:
 			emptyPending := true
@@ -269,10 +270,10 @@ func (s *server) MainRoutine() {
 func (s *server) Read() (int, []byte, error) {
 	s.readFunctionCall <- struct{}{}
 	res := <-s.readFunctionCallRes
-	if res.err_id == -1 {
+	if res.err_id == errServerClosed {
 		return -1, nil, errors.New("Server is closed")
 	}
-	if res.err_id == -2 {
+	if res.err_id == errClientClosed {
 		return -1, nil, errors.New("Connection with client id: " + strconv.Itoa(res.message.ConnID) + " is closed")
 	}
 	return res.message.ConnID, res.message.Payload, nil
@@ -283,13 +284,10 @@ func (s *server) Write(connId int, payload []byte) error {
 	if res := <-s.checkIDCallRes; !res {
 		return errors.New("client ID does not exist")
 	}
-	var message Message
-	message.Type = MsgData
-	message.ConnID = connId
-	message.Payload = payload
+	message := NewData(connId, 0, 0, payload, 0)
 	go func() {
 		s.attemptWriting <- connId
-		s.pendingMessages[connId] <- &message
+		s.pendingMessages[connId] <- message
 	}()
 	return nil
 }
