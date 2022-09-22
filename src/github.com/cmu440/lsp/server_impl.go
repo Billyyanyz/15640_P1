@@ -125,14 +125,13 @@ func (s *server) connectionRoutine() {
 		case <-s.stopConnection:
 			return
 		default:
-			var addr *lspnet.UDPAddr
-			var err error
 			var b []byte
-			if _, addr, err = s.udpConn.ReadFromUDP(b); err != nil {
+			n, addr, err := s.udpConn.ReadFromUDP(b)
+			if err != nil {
 				return
 			}
 			var message Message
-			if err = json.Unmarshal(b, &message); err != nil {
+			if err = json.Unmarshal(b[:n], &message); err != nil {
 				continue
 			}
 			switch message.Type {
