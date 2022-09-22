@@ -19,7 +19,7 @@ type client struct {
 	stopMainRoutine   chan struct{}
 	stopReadRoutine   chan struct{}
 	connectionSuccess chan struct{}
-	startReading      chan struct{} // User wakes up read routine
+	readFunctionCall      chan struct{} // User wakes up read routine
 
 	readMessage chan MessageError
 	readPayload chan PayloadError
@@ -65,7 +65,7 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 		stopMainRoutine:   make(chan struct{}),
 		stopReadRoutine:   make(chan struct{}),
 		connectionSuccess: make(chan struct{}),
-		startReading:      make(chan struct{}),
+		readFunctionCall:      make(chan struct{}),
 		readMessage:       make(chan MessageError),
 		readPayload:       make(chan PayloadError),
 	}
@@ -80,7 +80,8 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 	}
 	_, err = c.udpConn.Write(connectRawMsg)
 	
-	<-c.connectionSuccess
+	// Block until we get the first Ack
+	_, err = c.Read()
 
 	return c, nil
 }
@@ -103,7 +104,6 @@ func (c *client) MainRoutine() {
 			switch message.Type {
 			case MsgConnect:
 				c.connID = message.ConnID
-				c.connectionSuccess <- struct{}{}
 				// Connection establishment Ack goes through
 				// public read API
 				c.readPayload <- PayloadError{
@@ -120,24 +120,25 @@ func (c *client) ReadRoutine() {
 		select {
 		case <-c.stopReadRoutine:
 			return
-		default:
+		case <-c.readFunctionCall:
 			rawMsg := make([]byte, 2048)
 			var me MessageError
 			_, err := c.udpConn.Read(rawMsg)
 			if err != nil {
 				me.err = err
 			}
-			json.Unmarshal(rawMsg, me.message)
+			json.Unmarshal(rawMsg, &me.message)
 			c.readMessage <- me
 		}
 	}
 }
+
 func (c *client) ConnID() int {
 	return c.connID
 }
 
 func (c *client) Read() ([]byte, error) {
-	c.startReading <- struct{}{}
+	c.readFunctionCall <- struct{}{}
 	pe := <-c.readPayload
 	return pe.payload, pe.err
 }
