@@ -21,17 +21,25 @@ func newSlidingWindowSender(sn int, windowSize int, maxUnackedMsg int) slidingWi
 	return s
 }
 
-func (w *slidingWindowSender) getSeriesNum() int {
+func (w *slidingWindowSender) readyToSend() bool {
 	if len(w.data) >= w.maxUnackedMsg {
-		return -1
+		return false
 	}
 	if w.currentSN >= w.l+w.size {
-		return -1
+		return false
 	}
-	w.currentSN++
-	return w.currentSN - 1
+	return true
 }
 
+func (w *slidingWindowSender) getSeriesNum() int {
+	res := w.currentSN
+	w.currentSN++
+	return res
+}
+
+func (w *slidingWindowSender) empty() bool {
+	return len(w.data) == 0
+}
 func (w *slidingWindowSender) backupMsg(m *Message) {
 	w.data[m.SeqNum] = m
 }
