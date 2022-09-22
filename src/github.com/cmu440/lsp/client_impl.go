@@ -2,10 +2,36 @@
 
 package lsp
 
-import "errors"
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+
+	"github.com/cmu440/lspnet"
+)
 
 type client struct {
-	// TODO: implement this!
+	connID  int
+	readSeqNum int
+	writeSeqNum int
+	udpConn *lspnet.UDPConn
+	// Signals
+	stopMainRoutine   chan struct{}
+	stopReadRoutine   chan struct{}
+	connectionSuccess chan struct{}
+	startReading      chan struct{} // User wakes up read routine
+
+	readMessage chan MessageError
+	readPayload chan PayloadError
+}
+
+type PayloadError struct {
+	payload []byte
+	err     error
+}
+type MessageError struct {
+	message Message
+	err     error
 }
 
 // NewClient creates, initiates, and returns a new client. This function
@@ -22,17 +48,98 @@ type client struct {
 // hostport is a colon-separated string identifying the server's host address
 // and port number (i.e., "localhost:9999").
 func NewClient(hostport string, initialSeqNum int, params *Params) (Client, error) {
-	return nil, errors.New("not yet implemented")
+	addr, err := lspnet.ResolveUDPAddr("udp", hostport)
+	if err != nil {
+		return nil, err
+	}
+	conn, err := lspnet.DialUDP("udp", nil, addr)
+	if err != nil {
+		return nil, err
+	}
+
+	c := &client{
+		connID:            0,
+		readSeqNum:        0,
+		writeSeqNum:       0,
+		udpConn:           conn,
+		stopMainRoutine:   make(chan struct{}),
+		stopReadRoutine:   make(chan struct{}),
+		connectionSuccess: make(chan struct{}),
+		startReading:      make(chan struct{}),
+		readMessage:       make(chan MessageError),
+		readPayload:       make(chan PayloadError),
+	}
+
+	go c.MainRoutine()
+	go c.ReadRoutine()
+
+	connectMsg := NewConnect(c.writeSeqNum)
+	connectRawMsg, err := json.Marshal(connectMsg)
+	if err != nil {
+		return nil, err
+	}
+	_, err = c.udpConn.Write(connectRawMsg)
+	
+	<-c.connectionSuccess
+
+	return c, nil
 }
 
+func (c *client) MainRoutine() {
+	for {
+		select {
+		case <-c.stopMainRoutine:
+			return
+		case me := <-c.readMessage:
+			message := me.message
+			err := me.err
+			fmt.Printf("%s\n", &message)
+			if err != nil {
+				c.readPayload <- PayloadError{
+					message.Payload,
+					err,
+				}
+			}
+			switch message.Type {
+			case MsgConnect:
+				c.connID = message.ConnID
+				c.connectionSuccess <- struct{}{}
+				// Connection establishment Ack goes through
+				// public read API
+				c.readPayload <- PayloadError{
+					message.Payload,
+					nil,
+				}
+			}
+		}
+	}
+}
+
+func (c *client) ReadRoutine() {
+	for {
+		select {
+		case <-c.stopReadRoutine:
+			return
+		default:
+			rawMsg := make([]byte, 2048)
+			var me MessageError
+			_, err := c.udpConn.Read(rawMsg)
+			if err != nil {
+				me.err = err
+			}
+			json.Unmarshal(rawMsg, me.message)
+			c.readMessage <- me
+		}
+	}
+}
 func (c *client) ConnID() int {
-	return -1
+	return c.connID
 }
 
 func (c *client) Read() ([]byte, error) {
-	// TODO: remove this line when you are ready to begin implementing this method.
-	select {} // Blocks indefinitely.
-	return nil, errors.New("not yet implemented")
+	c.startReading <- struct{}{}
+	pe := <-c.readPayload
+	return pe.payload, pe.err
 }
 
 func (c *client) Write(payload []byte) error {
@@ -40,5 +147,8 @@ func (c *client) Write(payload []byte) error {
 }
 
 func (c *client) Close() error {
+	c.stopReadRoutine <- struct{}{}
+	c.stopMainRoutine <- struct{}{}
+	c.udpConn.Close()
 	return errors.New("not yet implemented")
 }

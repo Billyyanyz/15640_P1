@@ -7,6 +7,7 @@ import (
 	"errors"
 	"github.com/cmu440/lspnet"
 	"strconv"
+	"fmt"
 )
 
 type server struct {
@@ -125,7 +126,7 @@ func (s *server) connectionRoutine() {
 		case <-s.stopConnection:
 			return
 		default:
-			var b []byte
+			b := make([]byte, 2048)
 			n, addr, err := s.udpConn.ReadFromUDP(b)
 			if err != nil {
 				return
@@ -160,9 +161,18 @@ func (s *server) MainRoutine() {
 		case mwa := <-s.newClientConnecting:
 			if _, ok := s.clientsAddr[mwa.addr.String()]; !ok {
 				s.clientsCnt++
-				s.clientsID[s.clientsCnt] = s.newClientInfo(s.clientsCnt, mwa.addr, mwa.message.SeqNum+1)
-				s.clientsAddr[mwa.addr.String()] = s.clientsID[s.clientsCnt]
-				s.pendingMessages[s.clientsCnt] = make(chan *Message)
+
+				s.clientsID[s.clientsCnt] = s.newClientInfo(s.clientsCnt, mwa.addr, mwa.message.SeqNum) // TODO: Double check seq num
+				clientInfo := s.clientsID[s.clientsCnt]
+				s.clientsAddr[mwa.addr.String()] = clientInfo
+				connectAck := NewAck(clientInfo.connID, mwa.message.SeqNum)
+				fmt.Printf("Send: " + connectAck.String() + "\n")
+				connectAckRaw, err := json.Marshal(connectAck)
+				if err != nil {
+					fmt.Printf("Fucked up\n")
+					continue
+				}
+				s.udpConn.WriteToUDP(connectAckRaw, mwa.addr)
 			}
 			// write back Ack
 		case message := <-s.newAck:
