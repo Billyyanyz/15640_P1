@@ -31,7 +31,7 @@ type client struct {
 
 	readMessage          chan MessageError
 	readPayload          chan PayloadError
-	writeFunctionCallRes chan PayloadError
+	writeFunctionCallRes chan error
 }
 
 type PayloadError struct {
@@ -80,7 +80,7 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 		writeFunctionCall:    make(chan []byte),
 		readMessage:          make(chan MessageError),
 		readPayload:          make(chan PayloadError),
-		writeFunctionCallRes: make(chan PayloadError),
+		writeFunctionCallRes: make(chan error),
 	}
 
 	go c.MainRoutine()
@@ -139,10 +139,6 @@ func (c *client) MainRoutine() {
 					c.state = CSConnected
 					c.connectionSuccess <- struct{}{}
 				}
-				// c.readPayload <- PayloadError{
-				// 	message.Payload,
-				// 	nil,
-				// }
 			}
 		}
 	}
@@ -181,10 +177,10 @@ func (c *client) WriteRoutine() {
 			clientImplLog("Writing message: " + string(writeMsg.String()))
 			b, err := json.Marshal(writeMsg)
 			if err != nil {
-				c.writeFunctionCallRes <- PayloadError{[]byte("x"), err}
+				c.writeFunctionCallRes <- err
 			}
 			_, err = c.udpConn.Write(b)
-			c.writeFunctionCallRes <- PayloadError{[]byte("x"), err}
+			c.writeFunctionCallRes <- err
 		case message := <-c.writeAck:
 			writeMsg := NewAck(message.ConnID, message.SeqNum)
 			clientImplLog("Ack'ing to server: " + string(writeMsg.String()))
@@ -214,8 +210,7 @@ func (c *client) Read() ([]byte, error) {
 
 func (c *client) Write(payload []byte) error {
 	c.writeFunctionCall <- payload
-	res := <-c.writeFunctionCallRes
-	return res.err
+	return <-c.writeFunctionCallRes
 }
 
 func (c *client) Close() error {
