@@ -120,20 +120,20 @@ func (c *client) MainRoutine() {
 			}
 			switch message.Type {
 			case MsgConnect:
-				c.connID = message.ConnID
-				c.readPayload <- PayloadError{
-					message.Payload,
-					nil,
-				}
+				clientImplLog("--PANIC-- Client receives connect message!")
+				return
 			case MsgData:
 				clientImplLog("Reading data message: " + string(message.Payload))
-				c.readPayload <- PayloadError{
-					message.Payload,
-					nil,
-				}
+				go func() {
+					c.readPayload <- PayloadError{
+						message.Payload,
+						nil,
+					}
+				}()
 				c.writeAck <- message
 			case MsgAck:
 				clientImplLog("Reading Ack message: " + string(message.Payload))
+				// TODO: Implement sliding windows
 				if c.state == CSInit {
 					c.connID = message.ConnID
 					c.state = CSConnected
@@ -194,7 +194,6 @@ func (c *client) WriteRoutine() {
 				clientImplLog("Error when Ack'ing to server: " + err.Error())
 				return
 			}
-			clientImplLog("Ack'ed to server: " + string(writeMsg.String()))
 		}
 	}
 }
