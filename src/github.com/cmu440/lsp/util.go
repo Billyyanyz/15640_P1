@@ -4,7 +4,8 @@ import (
 	"fmt"
 )
 
-const verbose = true
+const verbose = false
+
 func clientImplLog(s string) {
 	if verbose {
 		fmt.Printf("[client_impl] %s\n", s)
