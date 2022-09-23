@@ -16,3 +16,6 @@
 
 # Idea
 .idea/
+
+# Shell scripts
+*.sh
