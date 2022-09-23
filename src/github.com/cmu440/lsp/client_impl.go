@@ -5,8 +5,6 @@ package lsp
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
-
 	"github.com/cmu440/lspnet"
 )
 
@@ -20,9 +18,11 @@ type client struct {
 	stopReadRoutine   chan struct{}
 	connectionSuccess chan struct{}
 	readFunctionCall      chan struct{} // User wakes up read routine
+	writeFunctionCall chan []byte // User wakes up write routine
 
 	readMessage chan MessageError
 	readPayload chan PayloadError
+	writeFunctionCallRes chan PayloadError
 }
 
 type PayloadError struct {
@@ -66,8 +66,10 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 		stopReadRoutine:   make(chan struct{}),
 		connectionSuccess: make(chan struct{}),
 		readFunctionCall:      make(chan struct{}),
+		writeFunctionCall: make(chan []byte),
 		readMessage:       make(chan MessageError),
 		readPayload:       make(chan PayloadError),
+		writeFunctionCallRes: make(chan PayloadError),
 	}
 
 	go c.MainRoutine()
@@ -79,9 +81,14 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 		return nil, err
 	}
 	_, err = c.udpConn.Write(connectRawMsg)
-	
+	if err != nil {
+		return nil, err
+	}
 	// Block until we get the first Ack
 	_, err = c.Read()
+	if err != nil {
+		return nil, err
+	}
 
 	return c, nil
 }
@@ -94,7 +101,7 @@ func (c *client) MainRoutine() {
 		case me := <-c.readMessage:
 			message := me.message
 			err := me.err
-			fmt.Printf("%s\n", &message)
+			clientImplLog("Reading message: " + message.String())
 			if err != nil {
 				c.readPayload <- PayloadError{
 					message.Payload,
@@ -111,6 +118,20 @@ func (c *client) MainRoutine() {
 					nil,
 				}
 			}
+		case payload := <-c.writeFunctionCall:
+			c.writeSeqNum++
+			seqNum := c.writeSeqNum // TODO: change to use sliding window
+			writeSize := len(payload)
+			checkSum := CalculateChecksum(c.connID, seqNum, writeSize, payload)
+			writeMsg := NewData(c.connID, seqNum, writeSize, payload, checkSum)
+			clientImplLog("Writing message: " + writeMsg.String())
+			b, err := json.Marshal(writeMsg)
+			if err != nil {
+				c.writeFunctionCallRes <- PayloadError{[]byte("x"), err}
+			}
+			_, err = c.udpConn.Write(b)
+			c.writeFunctionCallRes <- PayloadError{[]byte("x"), err}
+			clientImplLog("Post writing message: " + writeMsg.String())
 		}
 	}
 }
@@ -144,7 +165,11 @@ func (c *client) Read() ([]byte, error) {
 }
 
 func (c *client) Write(payload []byte) error {
-	return errors.New("not yet implemented")
+	c.writeFunctionCall <- payload
+	clientImplLog("Not finished writing")
+	res := <-c.writeFunctionCallRes
+	clientImplLog("Finished writing")
+	return res.err
 }
 
 func (c *client) Close() error {
