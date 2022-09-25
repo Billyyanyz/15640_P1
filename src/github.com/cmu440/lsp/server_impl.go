@@ -25,9 +25,9 @@ type server struct {
 
 	readFunctionCallRes chan messageWithErrID
 	checkIDCall         chan int
-	checkIDCallRes      chan bool
+	checkIDCallRes      chan clientErr
 	checkServerCall     chan struct{}
-	chekServerCallRes   chan bool
+	checkServerCallRes  chan bool
 	attemptWriting      chan int
 	pendingMessages     map[int]chan *Message
 	closeClient         chan int
@@ -43,17 +43,18 @@ type messageWithAddress struct {
 	addr    *lspnet.UDPAddr
 }
 
-type readErr int
+type clientErr int
 
 const (
-	errClientClosed readErr = iota
+	errClientNonexist clientErr = iota
+	errClientClosed
 	errClientDisconnected
 	errNil
 )
 
 type messageWithErrID struct {
 	message *Message
-	err_id  readErr
+	errId   clientErr
 }
 
 type clientInfo struct {
@@ -99,12 +100,11 @@ func NewServer(port int, params *Params) (Server, error) {
 		newCAck:             make(chan *Message),
 		newDataReceiving:    make(chan *Message),
 
-		readFunctionCall:    make(chan struct{}),
 		readFunctionCallRes: make(chan messageWithErrID),
 		checkIDCall:         make(chan int),
-		checkIDCallRes:      make(chan bool),
+		checkIDCallRes:      make(chan clientErr),
 		checkServerCall:     make(chan struct{}),
-		chekServerCallRes:   make(chan bool),
+		checkServerCallRes:  make(chan bool),
 		attemptWriting:      make(chan int),
 		pendingMessages:     make(map[int]chan *Message),
 		closeClient:         make(chan int),
@@ -167,6 +167,19 @@ func (s *server) MainRoutine() {
 			return
 		case <-s.closeFunctionCall:
 			s.pendingClose = true
+		case id := <-s.checkIDCall:
+			_, ok := s.clientsID[id]
+			if !ok {
+				s.checkIDCallRes <- errClientNonexist
+			} else {
+				if s.clientsID[id].closed {
+					s.checkIDCallRes <- errClientClosed
+				} else {
+					s.checkIDCallRes <- errNil
+				}
+			}
+		case <-s.checkServerCall:
+			s.checkServerCallRes <- !s.pendingClose
 		case mwa := <-s.newClientConnecting:
 			if _, ok := s.clientsAddr[mwa.addr.String()]; !ok {
 				s.clientsCnt++
@@ -211,7 +224,7 @@ func (s *server) MainRoutine() {
 				continue
 			}
 			cInfo.buffRecv.recvMsg(message)
-			readRes := make([]messageWithErrID, 1)
+			readRes := make([]messageWithErrID, 0)
 			for cInfo.buffRecv.readyToRead() {
 				readRes = append(readRes, messageWithErrID{cInfo.buffRecv.deliverToRead(), errNil})
 			}
@@ -221,7 +234,7 @@ func (s *server) MainRoutine() {
 					s.readFunctionCallRes <- mwei
 				}
 			}()
-			
+
 			retMessage := NewAck(message.ConnID, message.SeqNum)
 			go func() {
 				s.attemptWriting <- message.ConnID
@@ -255,7 +268,7 @@ func (s *server) MainRoutine() {
 			}()
 		case <-s.attemptClosing:
 			emptyPending := true
-			for id, _ := range s.clientsID {
+			for id := range s.clientsID {
 				if !(s.clientsID[id].closed || s.clientsID[id].slideSndr.empty()) {
 					emptyPending = false
 				}
@@ -271,36 +284,48 @@ func (s *server) MainRoutine() {
 
 func (s *server) Read() (int, []byte, error) {
 	s.checkServerCall <- struct{}{}
-	if res := <-s.chekServerCallRes; !res {
-		return -1, nil, errors.New("Server is closed")
+	if res := <-s.checkServerCallRes; !res {
+		return -1, nil, errors.New("server is closed")
 	}
 
 	res := <-s.readFunctionCallRes
-	if res.err_id == errClientClosed {
-		return -1, nil, errors.New("Connection with client id: " + strconv.Itoa(res.message.ConnID) + " is closed")
+	if res.errId == errClientClosed {
+		return -1, nil, errors.New("connection with client id: " + strconv.Itoa(res.message.ConnID) + " is closed")
 	}
 	return res.message.ConnID, res.message.Payload, nil
 }
 
 func (s *server) Write(connId int, payload []byte) error {
 	s.checkIDCall <- connId
-	if res := <-s.checkIDCallRes; !res {
+	res := <-s.checkIDCallRes
+	switch res {
+	case errClientNonexist:
 		return errors.New("client ID does not exist")
+	case errClientClosed:
+		return errors.New("client has been closed")
+	case errNil:
+		message := NewData(connId, 0, 0, payload, 0)
+		go func() {
+			s.attemptWriting <- connId
+			s.pendingMessages[connId] <- message
+		}()
+		return nil
 	}
-	message := NewData(connId, 0, 0, payload, 0)
-	go func() {
-		s.attemptWriting <- connId
-		s.pendingMessages[connId] <- message
-	}()
 	return nil
 }
 
 func (s *server) CloseConn(connId int) error {
 	s.checkIDCall <- connId
-	if res := <-s.checkIDCallRes; !res {
+	res := <-s.checkIDCallRes
+	switch res {
+	case errClientNonexist:
 		return errors.New("client ID does not exist")
+	case errClientClosed:
+		return errors.New("client has been closed")
+	case errNil:
+		s.closeClient <- connId
+		return nil
 	}
-	s.closeClient <- connId
 	return nil
 }
 
