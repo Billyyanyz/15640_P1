@@ -142,11 +142,11 @@ func (c *client) MainRoutine() {
 				clientImplLog("--PANIC-- Client receives connect message!")
 				return
 			case MsgData:
-				clientImplLog("Reading data message: " + string(message.Payload))
+				clientImplLog("Reading data message: " + message.String())
 				c.receivedMessages[message.SeqNum] = me
 				c.writeAck <- message
 			case MsgAck:
-				clientImplLog("Reading Ack message: " + string(message.Payload))
+				clientImplLog("Reading Ack message: " + message.String())
 				if c.state == CSInit {
 					c.connID = message.ConnID
 					c.state = CSConnected
@@ -156,7 +156,7 @@ func (c *client) MainRoutine() {
 				c.handleServerAck <- message
 				<-c.handleServerAckRes
 			case MsgCAck:
-				clientImplLog("Reading CAck message: " + string(message.Payload))
+				clientImplLog("Reading CAck message: " + message.String())
 				if c.state == CSInit {
 					c.connID = message.ConnID
 					c.state = CSConnected

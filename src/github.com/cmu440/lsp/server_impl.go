@@ -217,6 +217,7 @@ func (s *server) MainRoutine() {
 					goodReturn = true
 					mwei := messageWithErrID{cInfo.buffRecv.deliverToRead(), errNil}
 					s.readFunctionCallRes <- mwei
+					continue
 				}
 			}
 			if !goodReturn {
@@ -264,6 +265,7 @@ func (s *server) MainRoutine() {
 					if _, err = s.udpConn.WriteToUDP(b, cInfo.addr); err != nil {
 						continue
 					}
+					serverImplLog("Successfully wrote " + m.String())
 					cInfo.slideSndr.markMessageSent(m)
 				}
 			}
