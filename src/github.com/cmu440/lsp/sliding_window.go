@@ -1,51 +1,73 @@
 package lsp
 
-// change to sending window!!!
+import (
+	"errors"
+)
 
 type slidingWindowSender struct {
+	// [l, minUnsentSN) are messages sent but not Ack'ed
+	// [minUnsentSN, nextSN) are messages requested to send but not sent
+	// Messages >= minUnSentSN may be eligible to send, eligibility should
+	// be checked by the client and server's write routine by calling
+	// readyToSend()
 	l             int
-	currentSN     int
+	minUnsentSN   int
+	nextSN        int
 	size          int
-	data          map[int]*Message
+	unAckedList   map[int]*Message // [l, minUnsentSN)
+	unsentData    map[int]*Message // [minUnsentSN, nextSN)
 	maxUnackedMsg int
 }
 
+// Must be called AFTER the handshake is complete
 func newSlidingWindowSender(sn int, windowSize int, maxUnackedMsg int) slidingWindowSender {
 	s := slidingWindowSender{
 		l:             sn + 1,
-		currentSN:     sn + 1,
+		minUnsentSN:   sn + 1,
+		nextSN:        sn + 1,
 		size:          windowSize,
-		data:          make(map[int]*Message),
+		unAckedList:   make(map[int]*Message),
+		unsentData:    make(map[int]*Message),
 		maxUnackedMsg: maxUnackedMsg,
 	}
 	return s
 }
 
-func (w *slidingWindowSender) readyToSend() bool {
-	if len(w.data) >= w.maxUnackedMsg {
-		return false
+func (w *slidingWindowSender) nextMsgToSend() (int, *Message) {
+	if len(w.unsentData) == 0 {
+		return -1, nil
 	}
-	if w.currentSN >= w.l+w.size {
-		return false
+	if len(w.unAckedList) >= w.maxUnackedMsg {
+		return -2, nil
 	}
-	return true
+	if w.minUnsentSN >= w.l+w.size {
+		return -3, nil
+	}
+	return w.minUnsentSN, w.unsentData[w.minUnsentSN]
 }
 
 func (w *slidingWindowSender) getSeqNum() int {
-	res := w.currentSN
-	w.currentSN++
+	res := w.nextSN
+	w.nextSN++
 	return res
 }
 
-func (w *slidingWindowSender) empty() bool {
-	return len(w.data) == 0
+func (w *slidingWindowSender) backupUnsentMsg(m *Message) {
+	w.unsentData[m.SeqNum] = m
 }
-func (w *slidingWindowSender) backupMsg(m *Message) {
-	w.data[m.SeqNum] = m
+
+func (w *slidingWindowSender) markMessageSent(m *Message) error {
+	sn := m.SeqNum
+	if sn != w.minUnsentSN {
+		return errors.New("markMessageSent must be called in pair with NextSNToSend!")
+	}
+	w.unAckedList[sn] = m
+	w.minUnsentSN++
+	return nil
 }
 
 func (w *slidingWindowSender) ackMessage(sn int) {
-	delete(w.data, sn)
+	delete(w.unAckedList, sn)
 	if sn == w.l {
 		w.l++
 	}
@@ -53,7 +75,11 @@ func (w *slidingWindowSender) ackMessage(sn int) {
 
 func (w *slidingWindowSender) cackMessage(sn int) {
 	for i := w.l; i <= sn; i++ {
-		delete(w.data, i)
+		delete(w.unAckedList, i)
 	}
 	w.l = sn + 1
+}
+
+func (w *slidingWindowSender) empty() bool {
+	return len(w.unAckedList) == 0
 }
