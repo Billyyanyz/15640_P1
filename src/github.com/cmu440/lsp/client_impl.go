@@ -133,15 +133,12 @@ func (c *client) MainRoutine() {
 				c.writeAck <- message
 			case MsgAck:
 				clientImplLog("Reading Ack message: " + string(message.Payload))
+				// TODO: Implement sliding windows
 				if c.state == CSInit {
 					c.connID = message.ConnID
 					c.state = CSConnected
 					c.connectionSuccess <- struct{}{}
 				}
-				// c.readPayload <- PayloadError{
-				// 	message.Payload,
-				// 	nil,
-				// }
 			}
 		}
 	}
