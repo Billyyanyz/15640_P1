@@ -211,13 +211,17 @@ func (s *server) MainRoutine() {
 				continue
 			}
 			cInfo.buffRecv.recvMsg(message)
-
+			readRes := make([]messageWithErrID, 1)
 			for cInfo.buffRecv.readyToRead() {
-				readRes := messageWithErrID{cInfo.buffRecv.deliverToRead(), errNil}
-				go func() {
-					s.readFunctionCallRes <- readRes
-				}()
+				readRes = append(readRes, messageWithErrID{cInfo.buffRecv.deliverToRead(), errNil})
 			}
+
+			go func() {
+				for _, mwei := range readRes {
+					s.readFunctionCallRes <- mwei
+				}
+			}()
+			
 			retMessage := NewAck(message.ConnID, message.SeqNum)
 			go func() {
 				s.attemptWriting <- message.ConnID
