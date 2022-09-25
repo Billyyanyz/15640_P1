@@ -26,14 +26,16 @@ type server struct {
 	readFunctionCall    chan struct{}
 	readFunctionCallRes chan messageWithErrID
 	checkIDCall         chan int
-	checkIDCallRes      chan bool
+	checkIDCallRes      chan clientErr
+	checkServerCall     chan struct{}
+	checkServerCallRes  chan bool
 	attemptWriting      chan int
 	pendingMessages     map[int]chan *Message
 	closeClient         chan int
 
 	closeFunctionCall chan struct{}
 	attemptClosing    chan struct{}
-	stopConnection    chan struct{}
+	stopReadRoutine   chan struct{}
 	stopMain          chan struct{}
 }
 
@@ -42,18 +44,19 @@ type messageWithAddress struct {
 	addr    *lspnet.UDPAddr
 }
 
-type readErr int
+type clientErr int
 
 const (
-	errServerClosed readErr = iota
+	errClientNonexist clientErr = iota
 	errClientClosed
 	errClientDisconnected
+	errNoMessage
 	errNil
 )
 
 type messageWithErrID struct {
 	message *Message
-	err_id  readErr
+	errId   clientErr
 }
 
 type clientInfo struct {
@@ -102,14 +105,16 @@ func NewServer(port int, params *Params) (Server, error) {
 		readFunctionCall:    make(chan struct{}),
 		readFunctionCallRes: make(chan messageWithErrID),
 		checkIDCall:         make(chan int),
-		checkIDCallRes:      make(chan bool),
+		checkIDCallRes:      make(chan clientErr),
+		checkServerCall:     make(chan struct{}),
+		checkServerCallRes:  make(chan bool),
 		attemptWriting:      make(chan int),
 		pendingMessages:     make(map[int]chan *Message),
 		closeClient:         make(chan int),
 
 		closeFunctionCall: make(chan struct{}),
 		attemptClosing:    make(chan struct{}),
-		stopConnection:    make(chan struct{}),
+		stopReadRoutine:   make(chan struct{}),
 		stopMain:          make(chan struct{}),
 	}
 	var addr *lspnet.UDPAddr
@@ -123,15 +128,15 @@ func NewServer(port int, params *Params) (Server, error) {
 		return nil, err
 	}
 	s.udpConn = conn
-	go s.connectionRoutine()
+	go s.readRoutine()
 	go s.MainRoutine()
 	return s, nil
 }
 
-func (s *server) connectionRoutine() {
+func (s *server) readRoutine() {
 	for {
 		select {
-		case <-s.stopConnection:
+		case <-s.stopReadRoutine:
 			return
 		default:
 			b := make([]byte, 2048)
@@ -143,7 +148,6 @@ func (s *server) connectionRoutine() {
 			if err = json.Unmarshal(b[:n], &message); err != nil {
 				continue
 			}
-			println("READ" + message.String())
 			switch message.Type {
 			case MsgConnect:
 				s.newClientConnecting <- messageWithAddress{&message, addr}
@@ -165,6 +169,20 @@ func (s *server) MainRoutine() {
 			return
 		case <-s.closeFunctionCall:
 			s.pendingClose = true
+		case id := <-s.checkIDCall:
+			_, ok := s.clientsID[id]
+			if !ok {
+				s.checkIDCallRes <- errClientNonexist
+			} else {
+				if s.clientsID[id].closed {
+					s.checkIDCallRes <- errClientClosed
+				} else {
+					s.checkIDCallRes <- errNil
+				}
+			}
+		case <-s.checkServerCall:
+			s.checkServerCallRes <- !s.pendingClose
+
 		case mwa := <-s.newClientConnecting:
 			if _, ok := s.clientsAddr[mwa.addr.String()]; !ok {
 				s.clientsCnt++
@@ -209,38 +227,31 @@ func (s *server) MainRoutine() {
 				continue
 			}
 			cInfo.buffRecv.recvMsg(message)
+
 			retMessage := NewAck(message.ConnID, message.SeqNum)
 			go func() {
 				s.attemptWriting <- message.ConnID
 				s.pendingMessages[message.ConnID] <- retMessage
 			}()
+
 		case <-s.readFunctionCall:
-			// delete this part!
-			// read function do not make a call, instead just directly wait for a result
-			// result comes when data is received or connclose is done
-			println("ENTER READ FUNCTION CALL")
-			if s.serverClosed {
-				s.readFunctionCallRes <- messageWithErrID{nil, errServerClosed}
-				continue
-			}
-			go func() {
-				for {
-					for _, cInfo := range s.clientsID {
-						println(cInfo.connID)
-						if !cInfo.closed && cInfo.buffRecv.readyToRead() {
-							readRes := messageWithErrID{cInfo.buffRecv.deliverToRead(), errNil}
-							s.readFunctionCallRes <- readRes
-							return
-						}
-					}
+			var goodReturn = false
+			for _, cInfo := range s.clientsID {
+				if cInfo.buffRecv.readyToRead() {
+					goodReturn = true
+					mwei := messageWithErrID{cInfo.buffRecv.deliverToRead(), errNil}
+					s.readFunctionCallRes <- mwei
 				}
-			}()
+			}
+			if !goodReturn {
+				s.readFunctionCallRes <- messageWithErrID{nil, errNoMessage}
+			}
+
 		case id := <-s.attemptWriting:
 			message := <-s.pendingMessages[id]
 			cInfo := s.clientsID[id]
 			if message.Type == MsgData {
 				if !cInfo.slideSndr.readyToSend() {
-					println("ERROR SLIDING!")
 					go func() {
 						s.attemptWriting <- id
 						s.pendingMessages[id] <- message
@@ -251,7 +262,6 @@ func (s *server) MainRoutine() {
 				message.Size = len(message.Payload)
 				message.Checksum = CalculateChecksum(id, message.SeqNum, message.Size, message.Payload)
 			}
-			println("WRITE" + message.String())
 			if b, err := json.Marshal(message); err == nil {
 				if _, err := s.udpConn.WriteToUDP(b, cInfo.addr); err == nil {
 				}
@@ -263,14 +273,14 @@ func (s *server) MainRoutine() {
 			}()
 		case <-s.attemptClosing:
 			emptyPending := true
-			for id, _ := range s.clientsID {
+			for id := range s.clientsID {
 				if !(s.clientsID[id].closed || s.clientsID[id].slideSndr.empty()) {
 					emptyPending = false
 				}
 			}
 			if emptyPending {
 				s.serverClosed = true
-				s.stopConnection <- struct{}{}
+				s.stopReadRoutine <- struct{}{}
 				s.stopMain <- struct{}{}
 			}
 		}
@@ -278,40 +288,54 @@ func (s *server) MainRoutine() {
 }
 
 func (s *server) Read() (int, []byte, error) {
-	println("ReadCall")
-	s.readFunctionCall <- struct{}{}
-	println("WaitReadRes")
-	res := <-s.readFunctionCallRes
-	if res.err_id == errServerClosed {
-		return -1, nil, errors.New("Server is closed")
+	s.checkServerCall <- struct{}{}
+	if res := <-s.checkServerCallRes; !res {
+		return -1, nil, errors.New("server is closed")
 	}
-	if res.err_id == errClientClosed {
-		return -1, nil, errors.New("Connection with client id: " + strconv.Itoa(res.message.ConnID) + " is closed")
+
+	for {
+		s.readFunctionCall <- struct{}{}
+		res := <-s.readFunctionCallRes
+		if res.errId == errClientClosed {
+			return -1, nil, errors.New("connection with client id: " + strconv.Itoa(res.message.ConnID) + " is closed")
+		}
+		if res.errId == errNil {
+			return res.message.ConnID, res.message.Payload, nil
+		}
 	}
-	println("Returning read")
-	return res.message.ConnID, res.message.Payload, nil
 }
 
 func (s *server) Write(connId int, payload []byte) error {
-	println("Echoing")
 	s.checkIDCall <- connId
-	if res := <-s.checkIDCallRes; !res {
+	res := <-s.checkIDCallRes
+	switch res {
+	case errClientNonexist:
 		return errors.New("client ID does not exist")
+	case errClientClosed:
+		return errors.New("client has been closed")
+	case errNil:
+		message := NewData(connId, 0, 0, payload, 0)
+		go func() {
+			s.attemptWriting <- connId
+			s.pendingMessages[connId] <- message
+		}()
+		return nil
 	}
-	message := NewData(connId, 0, 0, payload, 0)
-	go func() {
-		s.attemptWriting <- connId
-		s.pendingMessages[connId] <- message
-	}()
 	return nil
 }
 
 func (s *server) CloseConn(connId int) error {
 	s.checkIDCall <- connId
-	if res := <-s.checkIDCallRes; !res {
+	res := <-s.checkIDCallRes
+	switch res {
+	case errClientNonexist:
 		return errors.New("client ID does not exist")
+	case errClientClosed:
+		return errors.New("client has been closed")
+	case errNil:
+		s.closeClient <- connId
+		return nil
 	}
-	s.closeClient <- connId
 	return nil
 }
 
