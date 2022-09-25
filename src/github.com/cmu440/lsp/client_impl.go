@@ -31,7 +31,8 @@ type client struct {
 
 	readMessage          chan MessageError
 	readPayload          chan PayloadError
-	writeFunctionCallRes chan PayloadError
+	writeFunctionCallRes chan error
+
 }
 
 type PayloadError struct {
@@ -80,7 +81,8 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 		writeFunctionCall:    make(chan []byte),
 		readMessage:          make(chan MessageError),
 		readPayload:          make(chan PayloadError),
-		writeFunctionCallRes: make(chan PayloadError),
+		writeFunctionCallRes: make(chan error),
+
 	}
 
 	go c.MainRoutine()
@@ -120,10 +122,24 @@ func (c *client) MainRoutine() {
 			}
 			switch message.Type {
 			case MsgConnect:
-				c.connID = message.ConnID
-				c.readPayload <- PayloadError{
-					message.Payload,
-					nil,
+				clientImplLog("--PANIC-- Client receives connect message!")
+				return
+			case MsgData:
+				clientImplLog("Reading data message: " + string(message.Payload))
+				go func() {
+					c.readPayload <- PayloadError{
+						message.Payload,
+						nil,
+					}
+				}()
+				c.writeAck <- message
+			case MsgAck:
+				clientImplLog("Reading Ack message: " + string(message.Payload))
+				// TODO: Implement sliding windows
+				if c.state == CSInit {
+					c.connID = message.ConnID
+					c.state = CSConnected
+					c.connectionSuccess <- struct{}{}
 				}
 			case MsgData:
 				clientImplLog("Reading data message: " + string(message.Payload))
@@ -181,10 +197,10 @@ func (c *client) WriteRoutine() {
 			clientImplLog("Writing message: " + string(writeMsg.String()))
 			b, err := json.Marshal(writeMsg)
 			if err != nil {
-				c.writeFunctionCallRes <- PayloadError{[]byte("x"), err}
+				c.writeFunctionCallRes <- err
 			}
 			_, err = c.udpConn.Write(b)
-			c.writeFunctionCallRes <- PayloadError{[]byte("x"), err}
+			c.writeFunctionCallRes <- err
 		case message := <-c.writeAck:
 			writeMsg := NewAck(message.ConnID, message.SeqNum)
 			clientImplLog("Ack'ing to server: " + string(writeMsg.String()))
@@ -198,7 +214,6 @@ func (c *client) WriteRoutine() {
 				clientImplLog("Error when Ack'ing to server: " + err.Error())
 				return
 			}
-			clientImplLog("Ack'ed to server: " + string(writeMsg.String()))
 		}
 	}
 }
@@ -214,8 +229,7 @@ func (c *client) Read() ([]byte, error) {
 
 func (c *client) Write(payload []byte) error {
 	c.writeFunctionCall <- payload
-	res := <-c.writeFunctionCallRes
-	return res.err
+	return <-c.writeFunctionCallRes
 }
 
 func (c *client) Close() error {
