@@ -7,7 +7,6 @@ import (
 	"errors"
 	"github.com/cmu440/lspnet"
 	"strconv"
-	"fmt"
 )
 
 type server struct {
@@ -144,6 +143,7 @@ func (s *server) connectionRoutine() {
 			if err = json.Unmarshal(b[:n], &message); err != nil {
 				continue
 			}
+			println("READ" + message.String())
 			switch message.Type {
 			case MsgConnect:
 				s.newClientConnecting <- messageWithAddress{&message, addr}
@@ -165,14 +165,13 @@ func (s *server) MainRoutine() {
 			return
 		case <-s.closeFunctionCall:
 			s.pendingClose = true
-		// when ack, send a signal to check if all buffer is empty, if so set serverclosed=true
-		// do only when pendingclose=true
 		case mwa := <-s.newClientConnecting:
 			if _, ok := s.clientsAddr[mwa.addr.String()]; !ok {
 				s.clientsCnt++
 				s.clientsID[s.clientsCnt] = s.newClientInfo(s.clientsCnt, mwa.addr, mwa.message.SeqNum)
 				cInfo := s.clientsID[s.clientsCnt]
 				s.clientsAddr[mwa.addr.String()] = cInfo
+				s.pendingMessages[cInfo.connID] = make(chan *Message)
 				retMessage := NewAck(cInfo.connID, mwa.message.SeqNum)
 				go func() {
 					s.attemptWriting <- cInfo.connID
@@ -242,6 +241,7 @@ func (s *server) MainRoutine() {
 				message.Size = len(message.Payload)
 				message.Checksum = CalculateChecksum(id, message.SeqNum, message.Size, message.Payload)
 			}
+			println("WRITE" + message.String())
 			if b, err := json.Marshal(message); err == nil {
 				if _, err := s.udpConn.WriteToUDP(b, cInfo.addr); err == nil {
 				}
