@@ -29,11 +29,11 @@ type client struct {
 	stopReadRoutine   chan struct{}
 	connectionSuccess chan struct{}
 
-	readFunctionCall  chan struct{}
-	readMessageGeneral          chan MessageError
-	readFunctionCallRes          chan *PayloadError
-	writeAck          chan Message  // We wake up write routine to Ack server's packet
-	writeFunctionCall chan []byte   // User wakes up write routine
+	readFunctionCall     chan struct{}
+	readMessageGeneral   chan MessageError
+	readFunctionCallRes  chan *PayloadError
+	writeAck             chan Message // We wake up write routine to Ack server's packet
+	writeFunctionCall    chan []byte  // User wakes up write routine
 	writeFunctionCallRes chan error
 }
 
@@ -75,15 +75,15 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 		writeSeqNum:          0,
 		state:                CSInit,
 		udpConn:              conn,
-		receivedMessages: 	      make(map[int]MessageError),
+		receivedMessages:     make(map[int]MessageError),
 		stopMainRoutine:      make(chan struct{}),
 		stopReadRoutine:      make(chan struct{}),
 		connectionSuccess:    make(chan struct{}),
 		readFunctionCall:     make(chan struct{}),
 		writeFunctionCall:    make(chan []byte),
-		readMessageGeneral:          make(chan MessageError),
+		readMessageGeneral:   make(chan MessageError),
 		writeAck:             make(chan Message),
-		readFunctionCallRes:          make(chan *PayloadError),
+		readFunctionCallRes:  make(chan *PayloadError),
 		writeFunctionCallRes: make(chan error),
 	}
 
@@ -135,11 +135,11 @@ func (c *client) MainRoutine() {
 				}
 			}
 		case <-c.readFunctionCall:
-			me, found := c.receivedMessages[c.readSeqNum + 1]
+			me, found := c.receivedMessages[c.readSeqNum+1]
 			if !found {
 				c.readFunctionCallRes <- nil
 			} else {
-				delete(c.receivedMessages, c.readSeqNum + 1)
+				delete(c.receivedMessages, c.readSeqNum+1)
 				c.readSeqNum++
 				c.readFunctionCallRes <- &PayloadError{
 					me.message.Payload,
@@ -152,7 +152,7 @@ func (c *client) MainRoutine() {
 
 func (c *client) ProcessReceivedMessage() *MessageError {
 	for sn, me := range c.receivedMessages {
-		if sn == c.readSeqNum + 1 {
+		if sn == c.readSeqNum+1 {
 			return &me
 		}
 	}
