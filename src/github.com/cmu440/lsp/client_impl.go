@@ -32,7 +32,6 @@ type client struct {
 	readMessage          chan MessageError
 	readPayload          chan PayloadError
 	writeFunctionCallRes chan error
-
 }
 
 type PayloadError struct {
@@ -82,7 +81,6 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 		readMessage:          make(chan MessageError),
 		readPayload:          make(chan PayloadError),
 		writeFunctionCallRes: make(chan error),
-
 	}
 
 	go c.MainRoutine()
@@ -141,24 +139,6 @@ func (c *client) MainRoutine() {
 					c.state = CSConnected
 					c.connectionSuccess <- struct{}{}
 				}
-			case MsgData:
-				clientImplLog("Reading data message: " + string(message.Payload))
-				c.readPayload <- PayloadError{
-					message.Payload,
-					nil,
-				}
-				c.writeAck <- message
-			case MsgAck:
-				clientImplLog("Reading Ack message: " + string(message.Payload))
-				if c.state == CSInit {
-					c.connID = message.ConnID
-					c.state = CSConnected
-					c.connectionSuccess <- struct{}{}
-				}
-				// c.readPayload <- PayloadError{
-				// 	message.Payload,
-				// 	nil,
-				// }
 			}
 		}
 	}
