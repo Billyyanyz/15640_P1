@@ -215,22 +215,29 @@ func (s *server) MainRoutine() {
 				s.pendingMessages[message.ConnID] <- retMessage
 			}()
 		case <-s.readFunctionCall:
+			println("ENTER READ FUNCTION CALL")
 			if s.serverClosed {
 				s.readFunctionCallRes <- messageWithErrID{nil, errServerClosed}
 				continue
 			}
-			for cID := range s.clientsID {
-				cInfo := s.clientsID[cID]
-				if !cInfo.closed && cInfo.buffRecv.readyToRead() {
-					readRes := messageWithErrID{cInfo.buffRecv.deliverToRead(), errNil}
-					s.readFunctionCallRes <- readRes
+			go func() {
+				for {
+					for _, cInfo := range s.clientsID {
+						println(cInfo.connID)
+						if !cInfo.closed && cInfo.buffRecv.readyToRead() {
+							readRes := messageWithErrID{cInfo.buffRecv.deliverToRead(), errNil}
+							s.readFunctionCallRes <- readRes
+							return
+						}
+					}
 				}
-			}
+			}()
 		case id := <-s.attemptWriting:
 			message := <-s.pendingMessages[id]
 			cInfo := s.clientsID[id]
 			if message.Type == MsgData {
 				if !cInfo.slideSndr.readyToSend() {
+					println("ERROR SLIDING!")
 					go func() {
 						s.attemptWriting <- id
 						s.pendingMessages[id] <- message
@@ -268,7 +275,9 @@ func (s *server) MainRoutine() {
 }
 
 func (s *server) Read() (int, []byte, error) {
+	println("ReadCall")
 	s.readFunctionCall <- struct{}{}
+	println("WaitReadRes")
 	res := <-s.readFunctionCallRes
 	if res.err_id == errServerClosed {
 		return -1, nil, errors.New("Server is closed")
@@ -276,10 +285,12 @@ func (s *server) Read() (int, []byte, error) {
 	if res.err_id == errClientClosed {
 		return -1, nil, errors.New("Connection with client id: " + strconv.Itoa(res.message.ConnID) + " is closed")
 	}
+	println("Returning read")
 	return res.message.ConnID, res.message.Payload, nil
 }
 
 func (s *server) Write(connId int, payload []byte) error {
+	println("Echoing")
 	s.checkIDCall <- connId
 	if res := <-s.checkIDCallRes; !res {
 		return errors.New("client ID does not exist")
