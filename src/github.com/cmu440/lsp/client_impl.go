@@ -107,7 +107,6 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 
 	go c.MainRoutine()
 	go c.ReadRoutine()
-	go c.WriteRoutine()
 
 	connectMsg := NewConnect(c.writeSeqNum)
 	connectRawMsg, err := json.Marshal(connectMsg)
@@ -122,6 +121,7 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 	<-c.connectionSuccess
 	sw := newSlidingWindowSender(initialSeqNum, params.WindowSize, params.MaxUnackedMessages)
 	c.sw = sw
+	go c.WriteRoutine()
 	return c, nil
 }
 
