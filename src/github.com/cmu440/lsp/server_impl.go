@@ -215,6 +215,9 @@ func (s *server) MainRoutine() {
 				s.pendingMessages[message.ConnID] <- retMessage
 			}()
 		case <-s.readFunctionCall:
+			// delete this part!
+			// read function do not make a call, instead just directly wait for a result
+			// result comes when data is received or connclose is done
 			println("ENTER READ FUNCTION CALL")
 			if s.serverClosed {
 				s.readFunctionCallRes <- messageWithErrID{nil, errServerClosed}
