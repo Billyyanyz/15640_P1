@@ -24,8 +24,9 @@ type client struct {
 	udpConn     *lspnet.UDPConn
 	params      *Params
 	// Cache
-	sw               slidingWindowSender
+	sw               slidingWindowSender2
 	receivedMessages map[int]MessageError
+	writeBuffer	 map[int]Message
 	// Signals
 	stopMainRoutine   chan struct{}
 	stopReadRoutine   chan struct{}
@@ -37,6 +38,10 @@ type client struct {
 	writeAck             chan Message // We wake up write routine to Ack server's packet
 	writeFunctionCall    chan []byte  // User wakes up write routine
 	writeFunctionCallRes chan error
+	handleServerAck chan Message
+	handleServerAckRes chan struct{}
+	handleServerCAck chan Message
+	handleServerCAckRes chan struct{}
 }
 
 type PayloadError struct {
@@ -71,7 +76,7 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 		return nil, err
 	}
 
-	slidingWindow := newSlidingWindowSender(0, params.WindowSize, params.MaxUnackedMessages)
+	// slidingWindow := newSlidingWindowSender(0, params.WindowSize, params.MaxUnackedMessages)
 	c := &client{
 		connID:               0,
 		readSeqNum:           0,
@@ -79,17 +84,25 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 		state:                CSInit,
 		udpConn:              conn,
 		params:               params,
-		sw:                   slidingWindow,
+
+		// sw:                   slidingWindow,
 		receivedMessages:     make(map[int]MessageError),
+		writeBuffer:	      make(map[int]Message),
+
 		stopMainRoutine:      make(chan struct{}),
 		stopReadRoutine:      make(chan struct{}),
 		connectionSuccess:    make(chan struct{}),
+
 		readFunctionCall:     make(chan struct{}),
-		writeFunctionCall:    make(chan []byte),
 		readMessageGeneral:   make(chan MessageError),
-		writeAck:             make(chan Message),
 		readFunctionCallRes:  make(chan *PayloadError),
+		writeAck:             make(chan Message),
+		writeFunctionCall:    make(chan []byte),
 		writeFunctionCallRes: make(chan error),
+		handleServerAck: make(chan Message),
+		handleServerAckRes: make(chan struct{}),
+		handleServerCAck: make(chan Message),
+		handleServerCAckRes: make(chan struct{}),
 	}
 
 	go c.MainRoutine()
@@ -107,6 +120,8 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 	}
 	// Block until we get the first Ack
 	<-c.connectionSuccess
+	sw := NewSlidingWindowSender2(params.WindowSize, params.MaxUnackedMessages)
+	c.sw = sw
 	return c, nil
 }
 
@@ -132,12 +147,24 @@ func (c *client) MainRoutine() {
 				c.writeAck <- message
 			case MsgAck:
 				clientImplLog("Reading Ack message: " + string(message.Payload))
-				c.sw.ackMessage(message.SeqNum)
 				if c.state == CSInit {
 					c.connID = message.ConnID
 					c.state = CSConnected
 					c.connectionSuccess <- struct{}{}
+					continue
 				}
+				c.handleServerAck <- message
+				<-c.handleServerAckRes
+			case MsgCAck:
+				clientImplLog("Reading CAck message: " + string(message.Payload))
+				if c.state == CSInit {
+					c.connID = message.ConnID
+					c.state = CSConnected
+					c.connectionSuccess <- struct{}{}
+					continue
+				}
+				c.handleServerCAck <- message
+				<-c.handleServerCAckRes
 			}
 		case <-c.readFunctionCall:
 			me, found := c.receivedMessages[c.readSeqNum+1]
@@ -189,18 +216,14 @@ func (c *client) WriteRoutine() {
 	for {
 		select {
 		case payload := <-c.writeFunctionCall:
-			c.writeSeqNum++
-			seqNum := c.writeSeqNum // TODO: use sliding window in default case
+			seqNum := c.sw.GetSeqNum()
 			writeSize := len(payload)
 			checkSum := CalculateChecksum(c.connID, seqNum, writeSize, payload)
 			writeMsg := NewData(c.connID, seqNum, writeSize, payload, checkSum)
-			clientImplLog("Writing message: " + string(writeMsg.String()))
-			b, err := json.Marshal(writeMsg)
-			if err != nil {
-				c.writeFunctionCallRes <- err
-			}
-			_, err = c.udpConn.Write(b)
-			c.writeFunctionCallRes <- err
+			clientImplLog("Backing up message: " + string(writeMsg.String()))
+			c.sw.BackupUnsentMsg(writeMsg)
+			c.writeFunctionCallRes <- nil
+			// TODO: What to return when there's an error?
 		case message := <-c.writeAck:
 			writeMsg := NewAck(message.ConnID, message.SeqNum)
 			clientImplLog("Ack'ing to server: " + string(writeMsg.String()))
@@ -214,6 +237,30 @@ func (c *client) WriteRoutine() {
 				clientImplLog("Error when Ack'ing to server: " + err.Error())
 				return
 			}
+		case message := <-c.handleServerAck:
+			c.sw.AckMessage(message.SeqNum)
+			c.handleServerAckRes <- struct{}{}
+		case message := <-c.handleServerCAck:
+			c.sw.CAckMessage(message.SeqNum)
+			c.handleServerCAckRes <- struct{}{}
+		default:
+			_, writeMsg := c.sw.NextMsgToSend()
+			if writeMsg == nil {
+				continue
+			}
+			clientImplLog("Writing message: " + string(writeMsg.String()))
+			b, err := json.Marshal(writeMsg)
+			if err != nil {
+				clientImplLog("Error writing message: " +
+				string(writeMsg.String()))
+			}
+			_, err = c.udpConn.Write(b)
+			if err != nil {
+				clientImplLog("Error writing message: " +
+				string(writeMsg.String()))
+			}
+			// TODO: Handle the error here
+			c.sw.MarkMessageSent(writeMsg)
 		}
 	}
 }
