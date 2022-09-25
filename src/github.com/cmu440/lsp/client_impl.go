@@ -16,21 +16,24 @@ const (
 )
 
 type client struct {
+	// States
 	connID      int
 	readSeqNum  int
 	writeSeqNum int
 	state       ClientState
 	udpConn     *lspnet.UDPConn
+	// Cache
+	receivedMessages map[int]MessageError
 	// Signals
 	stopMainRoutine   chan struct{}
 	stopReadRoutine   chan struct{}
 	connectionSuccess chan struct{}
-	readFunctionCall  chan struct{} // TODO: Delete
+
+	readFunctionCall  chan struct{}
+	readMessageGeneral          chan MessageError
+	readFunctionCallRes          chan *PayloadError
 	writeAck          chan Message  // We wake up write routine to Ack server's packet
 	writeFunctionCall chan []byte   // User wakes up write routine
-
-	readMessage          chan MessageError
-	readPayload          chan PayloadError
 	writeFunctionCallRes chan error
 }
 
@@ -72,14 +75,15 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 		writeSeqNum:          0,
 		state:                CSInit,
 		udpConn:              conn,
+		receivedMessages: 	      make(map[int]MessageError),
 		stopMainRoutine:      make(chan struct{}),
 		stopReadRoutine:      make(chan struct{}),
 		connectionSuccess:    make(chan struct{}),
 		readFunctionCall:     make(chan struct{}),
-		writeAck:             make(chan Message),
 		writeFunctionCall:    make(chan []byte),
-		readMessage:          make(chan MessageError),
-		readPayload:          make(chan PayloadError),
+		readMessageGeneral:          make(chan MessageError),
+		writeAck:             make(chan Message),
+		readFunctionCallRes:          make(chan *PayloadError),
 		writeFunctionCallRes: make(chan error),
 	}
 
@@ -106,17 +110,12 @@ func (c *client) MainRoutine() {
 		select {
 		case <-c.stopMainRoutine:
 			return
-		case me := <-c.readMessage:
-			// TODO: Update readSeqNum for the use of sliding
-			// windows
+		case me := <-c.readMessageGeneral:
 			message := me.message
 			err := me.err
 			clientImplLog("Reading message: " + message.String())
 			if err != nil {
-				c.readPayload <- PayloadError{
-					message.Payload,
-					err,
-				}
+				clientImplLog("Error: " + err.Error())
 			}
 			switch message.Type {
 			case MsgConnect:
@@ -124,12 +123,7 @@ func (c *client) MainRoutine() {
 				return
 			case MsgData:
 				clientImplLog("Reading data message: " + string(message.Payload))
-				go func() {
-					c.readPayload <- PayloadError{
-						message.Payload,
-						nil,
-					}
-				}()
+				c.receivedMessages[message.SeqNum] = me
 				c.writeAck <- message
 			case MsgAck:
 				clientImplLog("Reading Ack message: " + string(message.Payload))
@@ -140,8 +134,29 @@ func (c *client) MainRoutine() {
 					c.connectionSuccess <- struct{}{}
 				}
 			}
+		case <-c.readFunctionCall:
+			me, found := c.receivedMessages[c.readSeqNum + 1]
+			if !found {
+				c.readFunctionCallRes <- nil
+			} else {
+				delete(c.receivedMessages, c.readSeqNum + 1)
+				c.readSeqNum++
+				c.readFunctionCallRes <- &PayloadError{
+					me.message.Payload,
+					me.err,
+				}
+			}
 		}
 	}
+}
+
+func (c *client) ProcessReceivedMessage() *MessageError {
+	for sn, me := range c.receivedMessages {
+		if sn == c.readSeqNum + 1 {
+			return &me
+		}
+	}
+	return nil
 }
 
 func (c *client) ReadRoutine() {
@@ -160,7 +175,7 @@ func (c *client) ReadRoutine() {
 			if err != nil {
 				me.err = err
 			}
-			c.readMessage <- me
+			c.readMessageGeneral <- me
 		}
 	}
 }
@@ -203,8 +218,13 @@ func (c *client) ConnID() int {
 }
 
 func (c *client) Read() ([]byte, error) {
-	pe := <-c.readPayload
-	return pe.payload, pe.err
+	for {
+		c.readFunctionCall <- struct{}{}
+		pe := <-c.readFunctionCallRes
+		if pe != nil {
+			return pe.payload, pe.err
+		}
+	}
 }
 
 func (c *client) Write(payload []byte) error {
