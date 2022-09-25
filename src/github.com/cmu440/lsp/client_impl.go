@@ -22,7 +22,9 @@ type client struct {
 	writeSeqNum int
 	state       ClientState
 	udpConn     *lspnet.UDPConn
+	params      *Params
 	// Cache
+	sw               slidingWindowSender
 	receivedMessages map[int]MessageError
 	// Signals
 	stopMainRoutine   chan struct{}
@@ -69,12 +71,15 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 		return nil, err
 	}
 
+	slidingWindow := newSlidingWindowSender(0, params.WindowSize, params.MaxUnackedMessages)
 	c := &client{
 		connID:               0,
 		readSeqNum:           0,
 		writeSeqNum:          0,
 		state:                CSInit,
 		udpConn:              conn,
+		params:               params,
+		sw:                   slidingWindow,
 		receivedMessages:     make(map[int]MessageError),
 		stopMainRoutine:      make(chan struct{}),
 		stopReadRoutine:      make(chan struct{}),
@@ -127,7 +132,7 @@ func (c *client) MainRoutine() {
 				c.writeAck <- message
 			case MsgAck:
 				clientImplLog("Reading Ack message: " + string(message.Payload))
-				// TODO: Implement sliding windows
+				c.sw.ackMessage(message.SeqNum)
 				if c.state == CSInit {
 					c.connID = message.ConnID
 					c.state = CSConnected
@@ -185,7 +190,7 @@ func (c *client) WriteRoutine() {
 		select {
 		case payload := <-c.writeFunctionCall:
 			c.writeSeqNum++
-			seqNum := c.writeSeqNum // TODO: change to use sliding window
+			seqNum := c.writeSeqNum // TODO: use sliding window in default case
 			writeSize := len(payload)
 			checkSum := CalculateChecksum(c.connID, seqNum, writeSize, payload)
 			writeMsg := NewData(c.connID, seqNum, writeSize, payload, checkSum)
