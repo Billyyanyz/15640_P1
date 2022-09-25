@@ -34,7 +34,6 @@ type server struct {
 	closeFunctionCall chan struct{}
 	attemptClosing    chan struct{}
 	stopReadRoutine   chan struct{}
-	stopWriteRoutine  chan struct{}
 	stopMain          chan struct{}
 }
 
@@ -102,7 +101,7 @@ func NewServer(port int, params *Params) (Server, error) {
 		readFunctionCall:    make(chan struct{}),
 		readFunctionCallRes: make(chan messageWithErrID),
 		writeFunctionCall:   make(chan *Message),
-		writeAckCall:        make(chan *Message),
+		writeAckCall:        make(chan *Message, 1),
 		checkIDCall:         make(chan int),
 		checkIDCallRes:      make(chan bool),
 		closeClient:         make(chan int),
@@ -110,7 +109,6 @@ func NewServer(port int, params *Params) (Server, error) {
 		closeFunctionCall: make(chan struct{}),
 		attemptClosing:    make(chan struct{}),
 		stopReadRoutine:   make(chan struct{}),
-		stopWriteRoutine:  make(chan struct{}),
 		stopMain:          make(chan struct{}),
 	}
 	var addr *lspnet.UDPAddr
@@ -125,7 +123,6 @@ func NewServer(port int, params *Params) (Server, error) {
 	}
 	s.udpConn = conn
 	go s.ReadRoutine()
-	go s.WriteRoutine()
 	go s.MainRoutine()
 	return s, nil
 }
@@ -159,58 +156,6 @@ func (s *server) ReadRoutine() {
 	}
 }
 
-func (s *server) WriteRoutine() {
-	for {
-		select {
-		case <-s.stopWriteRoutine:
-			return
-		case m := <-s.writeFunctionCall:
-			cInfo := s.clientsID[m.ConnID]
-			m.SeqNum = cInfo.slideSndr.getSeqNum()
-			m.Size = len(m.Payload)
-			m.Checksum = CalculateChecksum(m.ConnID, m.SeqNum, m.Size, m.Payload)
-			cInfo.slideSndr.backupUnsentMsg(m)
-		case message := <-s.newAck:
-			cInfo := s.clientsID[message.ConnID]
-			cInfo.slideSndr.ackMessage(message.SeqNum)
-			if s.pendingClose {
-				go func() {
-					s.attemptClosing <- struct{}{}
-				}()
-			}
-		case message := <-s.newCAck:
-			cInfo := s.clientsID[message.ConnID]
-			cInfo.slideSndr.cackMessage(message.SeqNum)
-			if s.pendingClose {
-				go func() {
-					s.attemptClosing <- struct{}{}
-				}()
-			}
-		case m := <-s.writeAckCall:
-			b, err := json.Marshal(m)
-			if err != nil {
-				continue
-			}
-			if _, err = s.udpConn.WriteToUDP(b, s.clientsID[m.ConnID].addr); err != nil {
-				continue
-			}
-		default:
-			for _, cInfo := range s.clientsID {
-				if _, m := cInfo.slideSndr.nextMsgToSend(); m != nil {
-					b, err := json.Marshal(m)
-					if err != nil {
-						continue
-					}
-					if _, err = s.udpConn.WriteToUDP(b, cInfo.addr); err != nil {
-						continue
-					}
-					cInfo.slideSndr.markMessageSent(m)
-				}
-			}
-		}
-	}
-}
-
 func (s *server) MainRoutine() {
 	for {
 		select {
@@ -231,22 +176,38 @@ func (s *server) MainRoutine() {
 				retMessage := NewAck(cInfo.connID, mwa.message.SeqNum)
 				s.writeAckCall <- retMessage
 			}
-		case message := <-s.newDataReceiving:
-			cInfo := s.clientsID[message.ConnID]
+		case m := <-s.newAck:
+			cInfo := s.clientsID[m.ConnID]
+			cInfo.slideSndr.ackMessage(m.SeqNum)
+			if s.pendingClose {
+				go func() {
+					s.attemptClosing <- struct{}{}
+				}()
+			}
+		case m := <-s.newCAck:
+			cInfo := s.clientsID[m.ConnID]
+			cInfo.slideSndr.cackMessage(m.SeqNum)
+			if s.pendingClose {
+				go func() {
+					s.attemptClosing <- struct{}{}
+				}()
+			}
+		case m := <-s.newDataReceiving:
+			cInfo := s.clientsID[m.ConnID]
 			if cInfo.closed {
 				continue
 			}
-			if len(message.Payload) > message.Size {
+			if len(m.Payload) > m.Size {
 				continue
-			} else if len(message.Payload) < message.Size {
-				message.Payload = message.Payload[:message.Size]
+			} else if len(m.Payload) < m.Size {
+				m.Payload = m.Payload[:m.Size]
 			}
-			if CalculateChecksum(message.ConnID, message.SeqNum, message.Size, message.Payload) !=
-				message.Checksum {
+			if CalculateChecksum(m.ConnID, m.SeqNum, m.Size, m.Payload) !=
+				m.Checksum {
 				continue
 			}
-			cInfo.buffRecv.recvMsg(message)
-			retMessage := NewAck(message.ConnID, message.SeqNum)
+			cInfo.buffRecv.recvMsg(m)
+			retMessage := NewAck(m.ConnID, m.SeqNum)
 			s.writeAckCall <- retMessage
 
 		case <-s.readFunctionCall:
@@ -277,8 +238,34 @@ func (s *server) MainRoutine() {
 			if emptyPending {
 				s.serverClosed = true
 				s.stopReadRoutine <- struct{}{}
-				s.stopWriteRoutine <- struct{}{}
 				s.stopMain <- struct{}{}
+			}
+		case m := <-s.writeFunctionCall:
+			cInfo := s.clientsID[m.ConnID]
+			m.SeqNum = cInfo.slideSndr.getSeqNum()
+			m.Size = len(m.Payload)
+			m.Checksum = CalculateChecksum(m.ConnID, m.SeqNum, m.Size, m.Payload)
+			cInfo.slideSndr.backupUnsentMsg(m)
+		case m := <-s.writeAckCall:
+			b, err := json.Marshal(m)
+			if err != nil {
+				continue
+			}
+			if _, err = s.udpConn.WriteToUDP(b, s.clientsID[m.ConnID].addr); err != nil {
+				continue
+			}
+		default:
+			for _, cInfo := range s.clientsID {
+				if _, m := cInfo.slideSndr.nextMsgToSend(); m != nil {
+					b, err := json.Marshal(m)
+					if err != nil {
+						continue
+					}
+					if _, err = s.udpConn.WriteToUDP(b, cInfo.addr); err != nil {
+						continue
+					}
+					cInfo.slideSndr.markMessageSent(m)
+				}
 			}
 		}
 	}
