@@ -7,7 +7,6 @@ import (
 	"errors"
 	"github.com/cmu440/lspnet"
 	"strconv"
-	"fmt"
 )
 
 type server struct {
@@ -144,6 +143,7 @@ func (s *server) connectionRoutine() {
 			if err = json.Unmarshal(b[:n], &message); err != nil {
 				continue
 			}
+			println("READ" + message.String())
 			switch message.Type {
 			case MsgConnect:
 				s.newClientConnecting <- messageWithAddress{&message, addr}
@@ -165,14 +165,13 @@ func (s *server) MainRoutine() {
 			return
 		case <-s.closeFunctionCall:
 			s.pendingClose = true
-		// when ack, send a signal to check if all buffer is empty, if so set serverclosed=true
-		// do only when pendingclose=true
 		case mwa := <-s.newClientConnecting:
 			if _, ok := s.clientsAddr[mwa.addr.String()]; !ok {
 				s.clientsCnt++
 				s.clientsID[s.clientsCnt] = s.newClientInfo(s.clientsCnt, mwa.addr, mwa.message.SeqNum)
 				cInfo := s.clientsID[s.clientsCnt]
 				s.clientsAddr[mwa.addr.String()] = cInfo
+				s.pendingMessages[cInfo.connID] = make(chan *Message)
 				retMessage := NewAck(cInfo.connID, mwa.message.SeqNum)
 				go func() {
 					s.attemptWriting <- cInfo.connID
@@ -216,22 +215,32 @@ func (s *server) MainRoutine() {
 				s.pendingMessages[message.ConnID] <- retMessage
 			}()
 		case <-s.readFunctionCall:
+			// delete this part!
+			// read function do not make a call, instead just directly wait for a result
+			// result comes when data is received or connclose is done
+			println("ENTER READ FUNCTION CALL")
 			if s.serverClosed {
 				s.readFunctionCallRes <- messageWithErrID{nil, errServerClosed}
 				continue
 			}
-			for cID := range s.clientsID {
-				cInfo := s.clientsID[cID]
-				if !cInfo.closed && cInfo.buffRecv.readyToRead() {
-					readRes := messageWithErrID{cInfo.buffRecv.deliverToRead(), errNil}
-					s.readFunctionCallRes <- readRes
+			go func() {
+				for {
+					for _, cInfo := range s.clientsID {
+						println(cInfo.connID)
+						if !cInfo.closed && cInfo.buffRecv.readyToRead() {
+							readRes := messageWithErrID{cInfo.buffRecv.deliverToRead(), errNil}
+							s.readFunctionCallRes <- readRes
+							return
+						}
+					}
 				}
-			}
+			}()
 		case id := <-s.attemptWriting:
 			message := <-s.pendingMessages[id]
 			cInfo := s.clientsID[id]
 			if message.Type == MsgData {
 				if !cInfo.slideSndr.readyToSend() {
+					println("ERROR SLIDING!")
 					go func() {
 						s.attemptWriting <- id
 						s.pendingMessages[id] <- message
@@ -242,6 +251,7 @@ func (s *server) MainRoutine() {
 				message.Size = len(message.Payload)
 				message.Checksum = CalculateChecksum(id, message.SeqNum, message.Size, message.Payload)
 			}
+			println("WRITE" + message.String())
 			if b, err := json.Marshal(message); err == nil {
 				if _, err := s.udpConn.WriteToUDP(b, cInfo.addr); err == nil {
 				}
@@ -268,7 +278,9 @@ func (s *server) MainRoutine() {
 }
 
 func (s *server) Read() (int, []byte, error) {
+	println("ReadCall")
 	s.readFunctionCall <- struct{}{}
+	println("WaitReadRes")
 	res := <-s.readFunctionCallRes
 	if res.err_id == errServerClosed {
 		return -1, nil, errors.New("Server is closed")
@@ -276,10 +288,12 @@ func (s *server) Read() (int, []byte, error) {
 	if res.err_id == errClientClosed {
 		return -1, nil, errors.New("Connection with client id: " + strconv.Itoa(res.message.ConnID) + " is closed")
 	}
+	println("Returning read")
 	return res.message.ConnID, res.message.Payload, nil
 }
 
 func (s *server) Write(connId int, payload []byte) error {
+	println("Echoing")
 	s.checkIDCall <- connId
 	if res := <-s.checkIDCallRes; !res {
 		return errors.New("client ID does not exist")
