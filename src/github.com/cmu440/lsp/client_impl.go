@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/cmu440/lspnet"
+	"time"
 )
 
 type ClientState int
@@ -97,7 +98,7 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 		readMessageGeneral:   make(chan MessageError),
 		readFunctionCallRes:  make(chan *PayloadError),
 		writeAck:             make(chan Message),
-		writeFunctionCall:    make(chan []byte),
+		writeFunctionCall:    make(chan []byte, 1),
 		writeFunctionCallRes: make(chan error),
 		handleServerAck:      make(chan Message),
 		handleServerAckRes:   make(chan struct{}),
@@ -223,6 +224,7 @@ func (c *client) WriteRoutine() {
 			clientImplLog("Backing up message: " + string(writeMsg.String()))
 			c.sw.backupUnsentMsg(writeMsg)
 			c.writeFunctionCallRes <- nil
+			c.checkSendMsg()
 			// TODO: What to return when there's an error?
 		case message := <-c.writeAck:
 			writeMsg := NewAck(message.ConnID, message.SeqNum)
@@ -241,29 +243,33 @@ func (c *client) WriteRoutine() {
 		case message := <-c.handleServerAck:
 			c.sw.ackMessage(message.SeqNum)
 			c.handleServerAckRes <- struct{}{}
+			c.checkSendMsg()
 		case message := <-c.handleServerCAck:
 			c.sw.cackMessage(message.SeqNum)
 			c.handleServerCAckRes <- struct{}{}
-		default:
-			_, writeMsg := c.sw.nextMsgToSend()
-			if writeMsg == nil {
-				continue
-			}
-			clientImplLog("Writing message: " + string(writeMsg.String()))
-			b, err := json.Marshal(writeMsg)
-			if err != nil {
-				clientImplLog("Error writing message: " +
-					string(writeMsg.String()))
-			}
-			_, err = c.udpConn.Write(b)
-			if err != nil {
-				clientImplLog("Error writing message: " +
-					string(writeMsg.String()))
-			}
-			// TODO: Handle the error here
-			c.sw.markMessageSent(writeMsg)
+			c.checkSendMsg()
 		}
 	}
+}
+
+func (c *client) checkSendMsg() {
+	_, writeMsg := c.sw.nextMsgToSend()
+	if writeMsg == nil {
+		return
+	}
+	clientImplLog("Writing message: " + string(writeMsg.String()))
+	b, err := json.Marshal(writeMsg)
+	if err != nil {
+		clientImplLog("Error writing message: " +
+			string(writeMsg.String()))
+	}
+	_, err = c.udpConn.Write(b)
+	if err != nil {
+		clientImplLog("Error writing message: " +
+			string(writeMsg.String()))
+	}
+	// TODO: Handle the error here
+	c.sw.markMessageSent(writeMsg)
 }
 
 func (c *client) ConnID() int {
@@ -277,6 +283,7 @@ func (c *client) Read() ([]byte, error) {
 		if pe != nil {
 			return pe.payload, pe.err
 		}
+		time.Sleep(1 * time.Millisecond)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"github.com/cmu440/lspnet"
 	"strconv"
+	"time"
 )
 
 type server struct {
@@ -24,6 +25,7 @@ type server struct {
 	newDataReceiving    chan *Message
 
 	readFunctionCall    chan struct{}
+	readyForReadMsg     []*Message
 	readFunctionCallRes chan messageWithErrID
 	writeFunctionCall   chan *Message
 	writeAckCall        chan *Message
@@ -99,9 +101,10 @@ func NewServer(port int, params *Params) (Server, error) {
 		newDataReceiving:    make(chan *Message),
 
 		readFunctionCall:    make(chan struct{}),
+		readyForReadMsg:     make([]*Message, 0, 10),
 		readFunctionCallRes: make(chan messageWithErrID),
-		writeFunctionCall:   make(chan *Message),
-		writeAckCall:        make(chan *Message, 1),
+		writeFunctionCall:   make(chan *Message, 1),
+		writeAckCall:        make(chan *Message),
 		checkIDCall:         make(chan int),
 		checkIDCallRes:      make(chan bool),
 		closeClient:         make(chan int),
@@ -174,11 +177,18 @@ func (s *server) MainRoutine() {
 				cInfo := s.clientsID[s.clientsCnt]
 				s.clientsAddr[mwa.addr.String()] = cInfo
 				retMessage := NewAck(cInfo.connID, mwa.message.SeqNum)
-				s.writeAckCall <- retMessage
+				b, err := json.Marshal(retMessage)
+				if err != nil {
+					continue
+				}
+				if _, err = s.udpConn.WriteToUDP(b, s.clientsID[retMessage.ConnID].addr); err != nil {
+					continue
+				}
 			}
 		case m := <-s.newAck:
 			cInfo := s.clientsID[m.ConnID]
 			cInfo.slideSndr.ackMessage(m.SeqNum)
+			s.checkSendMsg(m.ConnID)
 			if s.pendingClose {
 				go func() {
 					s.attemptClosing <- struct{}{}
@@ -187,6 +197,7 @@ func (s *server) MainRoutine() {
 		case m := <-s.newCAck:
 			cInfo := s.clientsID[m.ConnID]
 			cInfo.slideSndr.cackMessage(m.SeqNum)
+			s.checkSendMsg(m.ConnID)
 			if s.pendingClose {
 				go func() {
 					s.attemptClosing <- struct{}{}
@@ -207,21 +218,24 @@ func (s *server) MainRoutine() {
 				continue
 			}
 			cInfo.buffRecv.recvMsg(m)
+			for cInfo.buffRecv.readyToRead() {
+				s.readyForReadMsg = append(s.readyForReadMsg, cInfo.buffRecv.deliverToRead())
+			}
 			retMessage := NewAck(m.ConnID, m.SeqNum)
-			s.writeAckCall <- retMessage
+			b, err := json.Marshal(retMessage)
+			if err != nil {
+				continue
+			}
+			if _, err = s.udpConn.WriteToUDP(b, s.clientsID[retMessage.ConnID].addr); err != nil {
+				continue
+			}
 
 		case <-s.readFunctionCall:
-			var goodReturn = false
-			for _, cInfo := range s.clientsID {
-				if cInfo.buffRecv.readyToRead() {
-					goodReturn = true
-					mwei := messageWithErrID{cInfo.buffRecv.deliverToRead(), errNil}
-					s.readFunctionCallRes <- mwei
-					continue
-				}
-			}
-			if !goodReturn {
+			if len(s.readyForReadMsg) == 0 {
 				s.readFunctionCallRes <- messageWithErrID{nil, errNoMessage}
+			} else {
+				s.readFunctionCallRes <- messageWithErrID{s.readyForReadMsg[0], errNil}
+				s.readyForReadMsg = s.readyForReadMsg[1:]
 			}
 
 		case id := <-s.closeClient:
@@ -247,29 +261,23 @@ func (s *server) MainRoutine() {
 			m.Size = len(m.Payload)
 			m.Checksum = CalculateChecksum(m.ConnID, m.SeqNum, m.Size, m.Payload)
 			cInfo.slideSndr.backupUnsentMsg(m)
-		case m := <-s.writeAckCall:
-			b, err := json.Marshal(m)
-			if err != nil {
-				continue
-			}
-			if _, err = s.udpConn.WriteToUDP(b, s.clientsID[m.ConnID].addr); err != nil {
-				continue
-			}
-		default:
-			for _, cInfo := range s.clientsID {
-				if _, m := cInfo.slideSndr.nextMsgToSend(); m != nil {
-					b, err := json.Marshal(m)
-					if err != nil {
-						continue
-					}
-					if _, err = s.udpConn.WriteToUDP(b, cInfo.addr); err != nil {
-						continue
-					}
-					serverImplLog("Successfully wrote " + m.String())
-					cInfo.slideSndr.markMessageSent(m)
-				}
-			}
+			s.checkSendMsg(m.ConnID)
 		}
+	}
+}
+
+func (s *server) checkSendMsg(id int) {
+	cInfo := s.clientsID[id]
+	if _, m := cInfo.slideSndr.nextMsgToSend(); m != nil {
+		b, err := json.Marshal(m)
+		if err != nil {
+			return
+		}
+		if _, err = s.udpConn.WriteToUDP(b, cInfo.addr); err != nil {
+			return
+		}
+		serverImplLog("Successfully wrote " + m.String())
+		cInfo.slideSndr.markMessageSent(m)
 	}
 }
 
@@ -283,6 +291,7 @@ func (s *server) Read() (int, []byte, error) {
 		if res.errId == errNil {
 			return res.message.ConnID, res.message.Payload, nil
 		}
+		time.Sleep(1 * time.Millisecond)
 	}
 }
 
