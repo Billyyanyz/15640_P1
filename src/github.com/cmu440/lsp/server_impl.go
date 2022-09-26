@@ -314,6 +314,7 @@ func (s *server) CloseConn(connId int) error {
 		return errors.New("client ID does not exist")
 	} else {
 		s.closeClient <- connId
+		// TODO: select in Read to handle closed connection
 		return nil
 	}
 }
