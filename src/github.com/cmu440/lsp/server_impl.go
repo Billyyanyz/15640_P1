@@ -7,7 +7,6 @@ import (
 	"errors"
 	"github.com/cmu440/lspnet"
 	"strconv"
-	"time"
 )
 
 type server struct {
@@ -26,6 +25,7 @@ type server struct {
 
 	readFunctionCall    chan struct{}
 	readyForReadMsg     []*Message
+	await               bool
 	readFunctionCallRes chan messageWithErrID
 	writeFunctionCall   chan *Message
 	writeAckCall        chan *Message
@@ -102,6 +102,7 @@ func NewServer(port int, params *Params) (Server, error) {
 
 		readFunctionCall:    make(chan struct{}),
 		readyForReadMsg:     make([]*Message, 0, 10),
+		await:               false,
 		readFunctionCallRes: make(chan messageWithErrID),
 		writeFunctionCall:   make(chan *Message, 1),
 		writeAckCall:        make(chan *Message),
@@ -221,6 +222,11 @@ func (s *server) MainRoutine() {
 			for cInfo.buffRecv.readyToRead() {
 				s.readyForReadMsg = append(s.readyForReadMsg, cInfo.buffRecv.deliverToRead())
 			}
+			if s.await {
+				s.readFunctionCallRes <- messageWithErrID{s.readyForReadMsg[0], errNil}
+				s.readyForReadMsg = s.readyForReadMsg[1:]
+				s.await = false
+			}
 			retMessage := NewAck(m.ConnID, m.SeqNum)
 			b, err := json.Marshal(retMessage)
 			if err != nil {
@@ -232,7 +238,7 @@ func (s *server) MainRoutine() {
 
 		case <-s.readFunctionCall:
 			if len(s.readyForReadMsg) == 0 {
-				s.readFunctionCallRes <- messageWithErrID{nil, errNoMessage}
+				s.await = true
 			} else {
 				s.readFunctionCallRes <- messageWithErrID{s.readyForReadMsg[0], errNil}
 				s.readyForReadMsg = s.readyForReadMsg[1:]
@@ -282,17 +288,12 @@ func (s *server) checkSendMsg(id int) {
 }
 
 func (s *server) Read() (int, []byte, error) {
-	for {
-		s.readFunctionCall <- struct{}{}
-		res := <-s.readFunctionCallRes
-		if res.errId == errClientClosed {
-			return -1, nil, errors.New("connection with client id: " + strconv.Itoa(res.message.ConnID) + " is closed")
-		}
-		if res.errId == errNil {
-			return res.message.ConnID, res.message.Payload, nil
-		}
-		time.Sleep(1 * time.Millisecond)
+	s.readFunctionCall <- struct{}{}
+	res := <-s.readFunctionCallRes
+	if res.errId == errClientClosed {
+		return -1, nil, errors.New("connection with client id: " + strconv.Itoa(res.message.ConnID) + " is closed")
 	}
+	return res.message.ConnID, res.message.Payload, nil
 }
 
 func (s *server) Write(connId int, payload []byte) error {

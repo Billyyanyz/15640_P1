@@ -228,8 +228,7 @@ func TestBasic4(t *testing.T) {
 	newTestSystem(t, 10, makeParams(5, 2000, 2, 2)).
 		setDescription("TestBasic4: Ten clients, long interaction").
 		setNumMsgs(50).
-		runTest(200000)
-	//runTest(2000)
+		runTest(2000)
 }
 
 func TestBasic5(t *testing.T) {
