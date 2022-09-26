@@ -26,12 +26,13 @@ type server struct {
 	readFunctionCall    chan struct{}
 	readyForReadMsg     []*Message
 	await               bool
-	readFunctionCallRes chan messageWithErrID
+	readFunctionCallRes chan *Message
 	writeFunctionCall   chan *Message
 	writeAckCall        chan *Message
 	checkIDCall         chan int
 	checkIDCallRes      chan bool
 	closeClient         chan int
+	closeClientToRead   chan int
 
 	closeFunctionCall chan struct{}
 	attemptClosing    chan struct{}
@@ -42,19 +43,6 @@ type server struct {
 type messageWithAddress struct {
 	message *Message
 	addr    *lspnet.UDPAddr
-}
-
-type clientErr int
-
-const (
-	errNil clientErr = iota
-	errClientClosed
-	errNoMessage
-)
-
-type messageWithErrID struct {
-	message *Message
-	errId   clientErr
 }
 
 type clientInfo struct {
@@ -103,7 +91,7 @@ func NewServer(port int, params *Params) (Server, error) {
 		readFunctionCall:    make(chan struct{}),
 		readyForReadMsg:     make([]*Message, 0, 10),
 		await:               false,
-		readFunctionCallRes: make(chan messageWithErrID),
+		readFunctionCallRes: make(chan *Message),
 		writeFunctionCall:   make(chan *Message, 1),
 		writeAckCall:        make(chan *Message),
 		checkIDCall:         make(chan int),
@@ -142,19 +130,19 @@ func (s *server) ReadRoutine() {
 			if err != nil {
 				return
 			}
-			var message Message
-			if err = json.Unmarshal(b[:n], &message); err != nil {
+			var m Message
+			if err = json.Unmarshal(b[:n], &m); err != nil {
 				continue
 			}
-			switch message.Type {
+			switch m.Type {
 			case MsgConnect:
-				s.newClientConnecting <- messageWithAddress{&message, addr}
+				s.newClientConnecting <- messageWithAddress{&m, addr}
 			case MsgAck:
-				s.newAck <- &message
+				s.newAck <- &m
 			case MsgCAck:
-				s.newCAck <- &message
+				s.newCAck <- &m
 			case MsgData:
-				s.newDataReceiving <- &message
+				s.newDataReceiving <- &m
 			}
 		}
 	}
@@ -167,88 +155,42 @@ func (s *server) MainRoutine() {
 			return
 		case <-s.closeFunctionCall:
 			s.pendingClose = true
+
+		case mwa := <-s.newClientConnecting:
+			s.handleConnect(mwa.message, mwa.addr)
+		case m := <-s.newAck:
+			s.handleCAck(m)
+		case m := <-s.newCAck:
+			s.handleCAck(m)
+		case m := <-s.newDataReceiving:
+			s.handleData(m)
+
 		case id := <-s.checkIDCall:
 			_, ok := s.clientsID[id]
 			s.checkIDCallRes <- ok
-
-		case mwa := <-s.newClientConnecting:
-			if _, ok := s.clientsAddr[mwa.addr.String()]; !ok {
-				s.clientsCnt++
-				s.clientsID[s.clientsCnt] = s.newClientInfo(s.clientsCnt, mwa.addr, mwa.message.SeqNum)
-				cInfo := s.clientsID[s.clientsCnt]
-				s.clientsAddr[mwa.addr.String()] = cInfo
-				retMessage := NewAck(cInfo.connID, mwa.message.SeqNum)
-				b, err := json.Marshal(retMessage)
-				if err != nil {
-					continue
-				}
-				if _, err = s.udpConn.WriteToUDP(b, s.clientsID[retMessage.ConnID].addr); err != nil {
-					continue
-				}
-			}
-		case m := <-s.newAck:
-			cInfo := s.clientsID[m.ConnID]
-			cInfo.slideSndr.ackMessage(m.SeqNum)
-			s.checkSendMsg(m.ConnID)
-			if s.pendingClose {
-				go func() {
-					s.attemptClosing <- struct{}{}
-				}()
-			}
-		case m := <-s.newCAck:
-			cInfo := s.clientsID[m.ConnID]
-			cInfo.slideSndr.cackMessage(m.SeqNum)
-			s.checkSendMsg(m.ConnID)
-			if s.pendingClose {
-				go func() {
-					s.attemptClosing <- struct{}{}
-				}()
-			}
-		case m := <-s.newDataReceiving:
-			cInfo := s.clientsID[m.ConnID]
-			if cInfo.closed {
-				continue
-			}
-			if len(m.Payload) > m.Size {
-				continue
-			} else if len(m.Payload) < m.Size {
-				m.Payload = m.Payload[:m.Size]
-			}
-			if CalculateChecksum(m.ConnID, m.SeqNum, m.Size, m.Payload) !=
-				m.Checksum {
-				continue
-			}
-			cInfo.buffRecv.recvMsg(m)
-			for cInfo.buffRecv.readyToRead() {
-				s.readyForReadMsg = append(s.readyForReadMsg, cInfo.buffRecv.deliverToRead())
-			}
-			if s.await && len(s.readyForReadMsg) != 0 {
-				s.readFunctionCallRes <- messageWithErrID{s.readyForReadMsg[0], errNil}
-				s.readyForReadMsg = s.readyForReadMsg[1:]
-				s.await = false
-			}
-			retMessage := NewAck(m.ConnID, m.SeqNum)
-			b, err := json.Marshal(retMessage)
-			if err != nil {
-				continue
-			}
-			if _, err = s.udpConn.WriteToUDP(b, s.clientsID[retMessage.ConnID].addr); err != nil {
-				continue
-			}
 
 		case <-s.readFunctionCall:
 			if len(s.readyForReadMsg) == 0 {
 				s.await = true
 			} else {
-				s.readFunctionCallRes <- messageWithErrID{s.readyForReadMsg[0], errNil}
+				s.readFunctionCallRes <- s.readyForReadMsg[0]
 				s.readyForReadMsg = s.readyForReadMsg[1:]
 			}
+
+		case m := <-s.writeFunctionCall:
+			cInfo := s.clientsID[m.ConnID]
+			m.SeqNum = cInfo.slideSndr.getSeqNum()
+			m.Size = len(m.Payload)
+			m.Checksum = CalculateChecksum(m.ConnID, m.SeqNum, m.Size, m.Payload)
+			cInfo.slideSndr.backupUnsentMsg(m)
+			s.checkSendMsg(m.ConnID)
 
 		case id := <-s.closeClient:
 			s.clientsID[id].closed = true
 			go func() {
-				s.readFunctionCallRes <- messageWithErrID{&Message{ConnID: id}, errClientClosed}
+				s.closeClientToRead <- id
 			}()
+
 		case <-s.attemptClosing:
 			emptyPending := true
 			for id := range s.clientsID {
@@ -261,15 +203,82 @@ func (s *server) MainRoutine() {
 				s.stopReadRoutine <- struct{}{}
 				s.stopMain <- struct{}{}
 			}
-		case m := <-s.writeFunctionCall:
-			cInfo := s.clientsID[m.ConnID]
-			m.SeqNum = cInfo.slideSndr.getSeqNum()
-			m.Size = len(m.Payload)
-			m.Checksum = CalculateChecksum(m.ConnID, m.SeqNum, m.Size, m.Payload)
-			cInfo.slideSndr.backupUnsentMsg(m)
-			s.checkSendMsg(m.ConnID)
+
 		}
 	}
+}
+
+func (s *server) ackWriteBack(id int, seqNum int) {
+	retMessage := NewAck(id, seqNum)
+	b, err := json.Marshal(retMessage)
+	if err != nil {
+		return
+	}
+	if _, err = s.udpConn.WriteToUDP(b, s.clientsID[id].addr); err != nil {
+		return
+	}
+}
+
+func (s *server) handleConnect(m *Message, addr *lspnet.UDPAddr) {
+	if _, ok := s.clientsAddr[addr.String()]; !ok {
+		s.clientsCnt++
+		s.clientsID[s.clientsCnt] = s.newClientInfo(s.clientsCnt, addr, m.SeqNum)
+		cInfo := s.clientsID[s.clientsCnt]
+		s.clientsAddr[addr.String()] = cInfo
+		s.ackWriteBack(cInfo.connID, m.SeqNum)
+	}
+}
+
+func (s *server) handleAck(m *Message) {
+	cInfo := s.clientsID[m.ConnID]
+	cInfo.slideSndr.ackMessage(m.SeqNum)
+	s.checkSendMsg(m.ConnID)
+	if s.pendingClose {
+		go func() {
+			s.attemptClosing <- struct{}{}
+		}()
+	}
+}
+
+func (s *server) handleCAck(m *Message) {
+	cInfo := s.clientsID[m.ConnID]
+	cInfo.slideSndr.cackMessage(m.SeqNum)
+	s.checkSendMsg(m.ConnID)
+	if s.pendingClose {
+		go func() {
+			s.attemptClosing <- struct{}{}
+		}()
+	}
+}
+
+func (s *server) ensureDataValidity(m *Message) bool {
+	if len(m.Payload) > m.Size {
+		return false
+	} else if len(m.Payload) < m.Size {
+		m.Payload = m.Payload[:m.Size]
+	}
+	if CalculateChecksum(m.ConnID, m.SeqNum, m.Size, m.Payload) != m.Checksum {
+		return false
+	}
+	return true
+}
+
+func (s *server) handleData(m *Message) {
+	cInfo := s.clientsID[m.ConnID]
+	if !s.ensureDataValidity(m) {
+		return
+	}
+	cInfo.buffRecv.recvMsg(m)
+
+	for cInfo.buffRecv.readyToRead() {
+		s.readyForReadMsg = append(s.readyForReadMsg, cInfo.buffRecv.deliverToRead())
+	}
+	if s.await && len(s.readyForReadMsg) != 0 {
+		s.readFunctionCallRes <- s.readyForReadMsg[0]
+		s.readyForReadMsg = s.readyForReadMsg[1:]
+		s.await = false
+	}
+	s.ackWriteBack(m.ConnID, m.SeqNum)
 }
 
 func (s *server) checkSendMsg(id int) {
@@ -282,18 +291,19 @@ func (s *server) checkSendMsg(id int) {
 		if _, err = s.udpConn.WriteToUDP(b, cInfo.addr); err != nil {
 			return
 		}
-		serverImplLog("Successfully wrote " + m.String())
 		cInfo.slideSndr.markMessageSent(m)
 	}
 }
 
 func (s *server) Read() (int, []byte, error) {
-	s.readFunctionCall <- struct{}{}
-	res := <-s.readFunctionCallRes
-	if res.errId == errClientClosed {
-		return -1, nil, errors.New("connection with client id: " + strconv.Itoa(res.message.ConnID) + " is closed")
+	select {
+	case id := <-s.closeClientToRead:
+		return -1, nil, errors.New("connection with client id: " + strconv.Itoa(id) + " is closed")
+	default:
+		s.readFunctionCall <- struct{}{}
+		m := <-s.readFunctionCallRes
+		return m.ConnID, m.Payload, nil
 	}
-	return res.message.ConnID, res.message.Payload, nil
 }
 
 func (s *server) Write(connId int, payload []byte) error {
