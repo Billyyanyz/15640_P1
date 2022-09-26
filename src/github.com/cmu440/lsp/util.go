@@ -4,7 +4,7 @@ import (
 	"fmt"
 )
 
-const verbose = true
+const verbose = false
 
 func clientImplLog(s string) {
 	if verbose {

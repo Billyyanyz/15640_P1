@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/cmu440/lspnet"
+	// "time"
 )
 
 type ClientState int
@@ -23,6 +24,7 @@ type client struct {
 	state       ClientState
 	udpConn     *lspnet.UDPConn
 	params      *Params
+	await       bool
 	// Cache
 	sw               slidingWindowSender
 	receivedMessages map[int]MessageError
@@ -84,6 +86,7 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 		state:       CSInit,
 		udpConn:     conn,
 		params:      params,
+		await:       false,
 
 		// sw:                   slidingWindow,
 		receivedMessages: make(map[int]MessageError),
@@ -97,7 +100,7 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 		readMessageGeneral:   make(chan MessageError),
 		readFunctionCallRes:  make(chan *PayloadError),
 		writeAck:             make(chan Message),
-		writeFunctionCall:    make(chan []byte),
+		writeFunctionCall:    make(chan []byte, 1),
 		writeFunctionCallRes: make(chan error),
 		handleServerAck:      make(chan Message),
 		handleServerAckRes:   make(chan struct{}),
@@ -107,7 +110,6 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 
 	go c.MainRoutine()
 	go c.ReadRoutine()
-	go c.WriteRoutine()
 
 	connectMsg := NewConnect(c.writeSeqNum)
 	connectRawMsg, err := json.Marshal(connectMsg)
@@ -122,6 +124,7 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 	<-c.connectionSuccess
 	sw := newSlidingWindowSender(initialSeqNum, params.WindowSize, params.MaxUnackedMessages)
 	c.sw = sw
+	go c.WriteRoutine()
 	return c, nil
 }
 
@@ -142,11 +145,20 @@ func (c *client) MainRoutine() {
 				clientImplLog("--PANIC-- Client receives connect message!")
 				return
 			case MsgData:
-				clientImplLog("Reading data message: " + string(message.Payload))
+				clientImplLog("Reading data message: " + message.String())
 				c.receivedMessages[message.SeqNum] = me
+				me, found := c.receivedMessages[c.readSeqNum+1]
+				if c.await && found {
+					delete(c.receivedMessages, c.readSeqNum+1)
+					c.readSeqNum++
+					c.readFunctionCallRes <- &PayloadError{
+						me.message.Payload,
+						me.err,
+					}
+				}
 				c.writeAck <- message
 			case MsgAck:
-				clientImplLog("Reading Ack message: " + string(message.Payload))
+				clientImplLog("Reading Ack message: " + message.String())
 				if c.state == CSInit {
 					c.connID = message.ConnID
 					c.state = CSConnected
@@ -156,7 +168,7 @@ func (c *client) MainRoutine() {
 				c.handleServerAck <- message
 				<-c.handleServerAckRes
 			case MsgCAck:
-				clientImplLog("Reading CAck message: " + string(message.Payload))
+				clientImplLog("Reading CAck message: " + message.String())
 				if c.state == CSInit {
 					c.connID = message.ConnID
 					c.state = CSConnected
@@ -169,7 +181,8 @@ func (c *client) MainRoutine() {
 		case <-c.readFunctionCall:
 			me, found := c.receivedMessages[c.readSeqNum+1]
 			if !found {
-				c.readFunctionCallRes <- nil
+				c.await = true
+				// c.readFunctionCallRes <- nil
 			} else {
 				delete(c.receivedMessages, c.readSeqNum+1)
 				c.readSeqNum++
@@ -223,6 +236,7 @@ func (c *client) WriteRoutine() {
 			clientImplLog("Backing up message: " + string(writeMsg.String()))
 			c.sw.backupUnsentMsg(writeMsg)
 			c.writeFunctionCallRes <- nil
+			c.checkSendMsg()
 			// TODO: What to return when there's an error?
 		case message := <-c.writeAck:
 			writeMsg := NewAck(message.ConnID, message.SeqNum)
@@ -241,29 +255,33 @@ func (c *client) WriteRoutine() {
 		case message := <-c.handleServerAck:
 			c.sw.ackMessage(message.SeqNum)
 			c.handleServerAckRes <- struct{}{}
+			c.checkSendMsg()
 		case message := <-c.handleServerCAck:
 			c.sw.cackMessage(message.SeqNum)
 			c.handleServerCAckRes <- struct{}{}
-		default:
-			_, writeMsg := c.sw.nextMsgToSend()
-			if writeMsg == nil {
-				continue
-			}
-			clientImplLog("Writing message: " + string(writeMsg.String()))
-			b, err := json.Marshal(writeMsg)
-			if err != nil {
-				clientImplLog("Error writing message: " +
-					string(writeMsg.String()))
-			}
-			_, err = c.udpConn.Write(b)
-			if err != nil {
-				clientImplLog("Error writing message: " +
-					string(writeMsg.String()))
-			}
-			// TODO: Handle the error here
-			c.sw.markMessageSent(writeMsg)
+			c.checkSendMsg()
 		}
 	}
+}
+
+func (c *client) checkSendMsg() {
+	_, writeMsg := c.sw.nextMsgToSend()
+	if writeMsg == nil {
+		return
+	}
+	clientImplLog("Writing message: " + string(writeMsg.String()))
+	b, err := json.Marshal(writeMsg)
+	if err != nil {
+		clientImplLog("Error writing message: " +
+			string(writeMsg.String()))
+	}
+	_, err = c.udpConn.Write(b)
+	if err != nil {
+		clientImplLog("Error writing message: " +
+			string(writeMsg.String()))
+	}
+	// TODO: Handle the error here
+	c.sw.markMessageSent(writeMsg)
 }
 
 func (c *client) ConnID() int {
@@ -271,13 +289,9 @@ func (c *client) ConnID() int {
 }
 
 func (c *client) Read() ([]byte, error) {
-	for {
-		c.readFunctionCall <- struct{}{}
-		pe := <-c.readFunctionCallRes
-		if pe != nil {
-			return pe.payload, pe.err
-		}
-	}
+	c.readFunctionCall <- struct{}{}
+	pe := <-c.readFunctionCallRes
+	return pe.payload, pe.err
 }
 
 func (c *client) Write(payload []byte) error {
