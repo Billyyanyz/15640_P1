@@ -222,7 +222,7 @@ func (s *server) MainRoutine() {
 			for cInfo.buffRecv.readyToRead() {
 				s.readyForReadMsg = append(s.readyForReadMsg, cInfo.buffRecv.deliverToRead())
 			}
-			if s.await {
+			if s.await && len(s.readyForReadMsg) != 0 {
 				s.readFunctionCallRes <- messageWithErrID{s.readyForReadMsg[0], errNil}
 				s.readyForReadMsg = s.readyForReadMsg[1:]
 				s.await = false
