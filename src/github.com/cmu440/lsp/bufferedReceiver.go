@@ -7,7 +7,7 @@ type bufferedReceiver struct {
 
 func newBufferedReceiver(sn int) bufferedReceiver {
 	s := bufferedReceiver{
-		l:    sn,
+		l:    sn + 1,
 		data: make(map[int]*Message),
 	}
 	return s

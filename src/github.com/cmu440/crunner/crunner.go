@@ -49,14 +49,14 @@ func main() {
 	}
 	hostport := lspnet.JoinHostPort(*host, strconv.Itoa(*port))
 	fmt.Printf("Connecting to server at '%s'...\n", hostport)
-	_, err := lsp.NewClient(hostport, 0, params)
+	cli, err := lsp.NewClient(hostport, 0, params)
 	
 	if err != nil {
 		fmt.Printf("Failed to connect to server at %s: %s\n", hostport, err)
 		return
 	}
 	fmt.Printf("Connected to server\n")
-	// runClient(cli)
+	runClient(cli)
 }
 
 func runClient(cli lsp.Client) {
