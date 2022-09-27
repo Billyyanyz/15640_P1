@@ -7,16 +7,15 @@ import (
 	"errors"
 	"github.com/cmu440/lspnet"
 	"strconv"
+	"time"
 )
 
 type server struct {
-	params       *Params
-	udpConn      *lspnet.UDPConn
-	clientsID    map[int]*clientInfo
-	clientsAddr  map[string]*clientInfo
-	clientsCnt   int
-	pendingClose bool
-	serverClosed bool
+	params      *Params
+	udpConn     *lspnet.UDPConn
+	clientsID   map[int]*clientInfo
+	clientsAddr map[string]*clientInfo
+	clientsCnt  int
 
 	newClientConnecting chan messageWithAddress
 	newAck              chan *Message
@@ -24,18 +23,24 @@ type server struct {
 	newDataReceiving    chan *Message
 
 	readFunctionCall    chan struct{}
+	readFunctionCallRes chan *Message
 	readyForReadMsg     []*Message
 	await               bool
-	readFunctionCallRes chan *Message
-	writeFunctionCall   chan *Message
-	writeAckCall        chan *Message
-	checkIDCall         chan int
-	checkIDCallRes      chan bool
-	closeClient         chan int
-	closeClientToRead   chan int
+
+	checkIDCall       chan int
+	checkIDCallRes    chan bool
+	writeFunctionCall chan *Message
+	writeAckCall      chan *Message
+	closeClient       chan int
+	closeClientToRead chan int
+
+	epochTimer *time.Ticker
+	epochCnt   int
 
 	closeFunctionCall chan struct{}
 	attemptClosing    chan struct{}
+	pendingClose      bool
+	serverClosed      bool
 	stopReadRoutine   chan struct{}
 	stopMain          chan struct{}
 }
@@ -52,7 +57,10 @@ type clientInfo struct {
 	buffRecv  bufferedReceiver
 	slideSndr slidingWindowSender
 
-	closed bool
+	activeWroteInEpoch  bool
+	activeReadFromEpoch bool
+	lastReadEpoch       int
+	closed              bool
 }
 
 func (s *server) newClientInfo(connID int, addr *lspnet.UDPAddr, sn int) *clientInfo {
@@ -63,7 +71,10 @@ func (s *server) newClientInfo(connID int, addr *lspnet.UDPAddr, sn int) *client
 		buffRecv:  newBufferedReceiver(sn),
 		slideSndr: newSlidingWindowSender(sn, s.params.WindowSize, s.params.MaxUnackedMessages),
 
-		closed: false,
+		activeWroteInEpoch:  false,
+		activeReadFromEpoch: true,
+		lastReadEpoch:       0,
+		closed:              false,
 	}
 
 }
@@ -76,12 +87,10 @@ func (s *server) newClientInfo(connID int, addr *lspnet.UDPAddr, sn int) *client
 // there was an error resolving or listening on the specified port number.
 func NewServer(port int, params *Params) (Server, error) {
 	s := &server{
-		params:       params,
-		clientsID:    make(map[int]*clientInfo),
-		clientsAddr:  make(map[string]*clientInfo),
-		clientsCnt:   0,
-		pendingClose: false,
-		serverClosed: false,
+		params:      params,
+		clientsID:   make(map[int]*clientInfo),
+		clientsAddr: make(map[string]*clientInfo),
+		clientsCnt:  0,
 
 		newClientConnecting: make(chan messageWithAddress),
 		newAck:              make(chan *Message),
@@ -89,17 +98,24 @@ func NewServer(port int, params *Params) (Server, error) {
 		newDataReceiving:    make(chan *Message),
 
 		readFunctionCall:    make(chan struct{}),
+		readFunctionCallRes: make(chan *Message),
 		readyForReadMsg:     make([]*Message, 0, 10),
 		await:               false,
-		readFunctionCallRes: make(chan *Message),
-		writeFunctionCall:   make(chan *Message, 1),
-		writeAckCall:        make(chan *Message),
-		checkIDCall:         make(chan int),
-		checkIDCallRes:      make(chan bool),
-		closeClient:         make(chan int),
+
+		checkIDCall:       make(chan int),
+		checkIDCallRes:    make(chan bool),
+		writeFunctionCall: make(chan *Message, 1),
+		writeAckCall:      make(chan *Message),
+		closeClient:       make(chan int),
+		closeClientToRead: make(chan int),
+
+		epochTimer: time.NewTicker(time.Duration(params.EpochMillis)),
+		epochCnt:   0,
 
 		closeFunctionCall: make(chan struct{}),
 		attemptClosing:    make(chan struct{}),
+		pendingClose:      false,
+		serverClosed:      false,
 		stopReadRoutine:   make(chan struct{}),
 		stopMain:          make(chan struct{}),
 	}
@@ -185,6 +201,10 @@ func (s *server) MainRoutine() {
 			cInfo.slideSndr.backupUnsentMsg(m)
 			s.checkSendMsg(m.ConnID)
 
+		case <-s.epochTimer.C:
+			s.epochCnt++
+			s.checkConnActivity()
+
 		case id := <-s.closeClient:
 			s.clientsID[id].closed = true
 			go func() {
@@ -208,15 +228,21 @@ func (s *server) MainRoutine() {
 	}
 }
 
-func (s *server) ackWriteBack(id int, seqNum int) {
-	retMessage := NewAck(id, seqNum)
-	b, err := json.Marshal(retMessage)
+func (s *server) writeMsg(m *Message, id int) {
+	cInfo := s.clientsID[id]
+	b, err := json.Marshal(m)
 	if err != nil {
 		return
 	}
-	if _, err = s.udpConn.WriteToUDP(b, s.clientsID[id].addr); err != nil {
+	if _, err = s.udpConn.WriteToUDP(b, cInfo.addr); err != nil {
 		return
 	}
+	cInfo.slideSndr.markMessageSent(m)
+}
+
+func (s *server) ackWriteBack(id int, seqNum int) {
+	retMessage := NewAck(id, seqNum)
+	s.writeMsg(retMessage, id)
 }
 
 func (s *server) handleConnect(m *Message, addr *lspnet.UDPAddr) {
@@ -231,23 +257,29 @@ func (s *server) handleConnect(m *Message, addr *lspnet.UDPAddr) {
 
 func (s *server) handleAck(m *Message) {
 	cInfo := s.clientsID[m.ConnID]
-	cInfo.slideSndr.ackMessage(m.SeqNum)
-	s.checkSendMsg(m.ConnID)
-	if s.pendingClose {
-		go func() {
-			s.attemptClosing <- struct{}{}
-		}()
+	cInfo.activeReadFromEpoch = true
+	if m.SeqNum > 0 {
+		cInfo.slideSndr.ackMessage(m.SeqNum)
+		s.checkSendMsg(m.ConnID)
+		if s.pendingClose {
+			go func() {
+				s.attemptClosing <- struct{}{}
+			}()
+		}
 	}
 }
 
 func (s *server) handleCAck(m *Message) {
 	cInfo := s.clientsID[m.ConnID]
-	cInfo.slideSndr.cackMessage(m.SeqNum)
-	s.checkSendMsg(m.ConnID)
-	if s.pendingClose {
-		go func() {
-			s.attemptClosing <- struct{}{}
-		}()
+	cInfo.activeReadFromEpoch = true
+	if m.SeqNum > 0 {
+		cInfo.slideSndr.cackMessage(m.SeqNum)
+		s.checkSendMsg(m.ConnID)
+		if s.pendingClose {
+			go func() {
+				s.attemptClosing <- struct{}{}
+			}()
+		}
 	}
 }
 
@@ -265,6 +297,7 @@ func (s *server) ensureDataValidity(m *Message) bool {
 
 func (s *server) handleData(m *Message) {
 	cInfo := s.clientsID[m.ConnID]
+	cInfo.activeReadFromEpoch = true
 	if !s.ensureDataValidity(m) {
 		return
 	}
@@ -284,14 +317,30 @@ func (s *server) handleData(m *Message) {
 func (s *server) checkSendMsg(id int) {
 	cInfo := s.clientsID[id]
 	if _, m := cInfo.slideSndr.nextMsgToSend(); m != nil {
-		b, err := json.Marshal(m)
-		if err != nil {
-			return
+		cInfo.activeWroteInEpoch = true
+		s.writeMsg(m, id)
+	}
+}
+
+func (s *server) checkConnActivity() {
+	for id, cInfo := range s.clientsID {
+		if !cInfo.activeWroteInEpoch {
+			s.ackWriteBack(id, 0)
 		}
-		if _, err = s.udpConn.WriteToUDP(b, cInfo.addr); err != nil {
-			return
+		if !cInfo.activeReadFromEpoch {
+			cInfo.lastReadEpoch++
+			if cInfo.lastReadEpoch >= s.params.EpochLimit {
+				go func() {
+					if err := s.CloseConn(id); err != nil {
+						return
+					}
+				}()
+			}
+		} else {
+			cInfo.lastReadEpoch = 0
 		}
-		cInfo.slideSndr.markMessageSent(m)
+		cInfo.activeWroteInEpoch = false
+		cInfo.activeReadFromEpoch = false
 	}
 }
 
@@ -324,7 +373,6 @@ func (s *server) CloseConn(connId int) error {
 		return errors.New("client ID does not exist")
 	} else {
 		s.closeClient <- connId
-		// TODO: select in Read to handle closed connection
 		return nil
 	}
 }
