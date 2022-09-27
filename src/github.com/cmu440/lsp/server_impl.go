@@ -31,18 +31,19 @@ type server struct {
 	checkIDCallRes    chan bool
 	writeFunctionCall chan *Message
 	writeAckCall      chan *Message
-	closeClient       chan int
-	closeClientToRead chan int
 
 	epochTimer *time.Ticker
 	epochCnt   int
 
-	closeFunctionCall chan struct{}
-	attemptClosing    chan struct{}
-	pendingClose      bool
-	serverClosed      bool
-	stopReadRoutine   chan struct{}
-	stopMain          chan struct{}
+	closeClientCall     chan int
+	pendingCloseClients map[int]bool
+
+	closeFunctionCall    chan struct{}
+	closeFunctionCallRes chan struct{}
+	pendingClose         bool
+	serverClosed         bool
+	stopReadRoutine      chan struct{}
+	stopMain             chan struct{}
 }
 
 type messageWithAddress struct {
@@ -106,18 +107,19 @@ func NewServer(port int, params *Params) (Server, error) {
 		checkIDCallRes:    make(chan bool),
 		writeFunctionCall: make(chan *Message, 1),
 		writeAckCall:      make(chan *Message),
-		closeClient:       make(chan int),
-		closeClientToRead: make(chan int),
 
 		epochTimer: time.NewTicker(time.Duration(params.EpochMillis)),
 		epochCnt:   0,
 
-		closeFunctionCall: make(chan struct{}),
-		attemptClosing:    make(chan struct{}),
-		pendingClose:      false,
-		serverClosed:      false,
-		stopReadRoutine:   make(chan struct{}),
-		stopMain:          make(chan struct{}),
+		closeClientCall:     make(chan int),
+		pendingCloseClients: make(map[int]bool),
+
+		closeFunctionCall:    make(chan struct{}),
+		closeFunctionCallRes: make(chan struct{}),
+		pendingClose:         false,
+		serverClosed:         false,
+		stopReadRoutine:      make(chan struct{}),
+		stopMain:             make(chan struct{}),
 	}
 	var addr *lspnet.UDPAddr
 	var err error
@@ -169,8 +171,6 @@ func (s *server) MainRoutine() {
 		select {
 		case <-s.stopMain:
 			return
-		case <-s.closeFunctionCall:
-			s.pendingClose = true
 
 		case mwa := <-s.newClientConnecting:
 			s.handleConnect(mwa.message, mwa.addr)
@@ -205,25 +205,15 @@ func (s *server) MainRoutine() {
 			s.epochCnt++
 			s.checkConnActivity()
 
-		case id := <-s.closeClient:
-			s.clientsID[id].closed = true
-			go func() {
-				s.closeClientToRead <- id
-			}()
-
-		case <-s.attemptClosing:
-			emptyPending := true
-			for id := range s.clientsID {
-				if !(s.clientsID[id].closed || s.clientsID[id].slideSndr.empty()) {
-					emptyPending = false
-				}
-			}
-			if emptyPending {
-				s.serverClosed = true
-				s.stopReadRoutine <- struct{}{}
-				s.stopMain <- struct{}{}
+		case id := <-s.closeClientCall:
+			s.pendingCloseClients[id] = true
+			if s.clientsID[id].slideSndr.empty() {
+				s.closeClientNow(id)
 			}
 
+		case <-s.closeFunctionCall:
+			s.pendingClose = true
+			s.attemptClosingServer()
 		}
 	}
 }
@@ -251,34 +241,43 @@ func (s *server) handleConnect(m *Message, addr *lspnet.UDPAddr) {
 		s.clientsID[s.clientsCnt] = s.newClientInfo(s.clientsCnt, addr, m.SeqNum)
 		cInfo := s.clientsID[s.clientsCnt]
 		s.clientsAddr[addr.String()] = cInfo
+		s.pendingCloseClients[s.clientsCnt] = false
 		s.ackWriteBack(cInfo.connID, m.SeqNum)
 	}
 }
 
 func (s *server) handleAck(m *Message) {
-	cInfo := s.clientsID[m.ConnID]
-	cInfo.activeReadFromEpoch = true
-	if m.SeqNum > 0 {
-		cInfo.slideSndr.ackMessage(m.SeqNum)
-		s.checkSendMsg(m.ConnID)
-		if s.pendingClose {
-			go func() {
-				s.attemptClosing <- struct{}{}
-			}()
+	if cInfo, ok := s.clientsID[m.ConnID]; ok {
+		cInfo.activeReadFromEpoch = true
+		if m.SeqNum > 0 {
+			cInfo.slideSndr.ackMessage(m.SeqNum)
+			s.checkSendMsg(m.ConnID)
+			if cInfo.slideSndr.empty() {
+				if s.pendingCloseClients[m.ConnID] {
+					s.closeClientNow(m.ConnID)
+				}
+				if s.pendingClose {
+					s.attemptClosingServer()
+				}
+			}
 		}
 	}
 }
 
 func (s *server) handleCAck(m *Message) {
-	cInfo := s.clientsID[m.ConnID]
-	cInfo.activeReadFromEpoch = true
-	if m.SeqNum > 0 {
-		cInfo.slideSndr.cackMessage(m.SeqNum)
-		s.checkSendMsg(m.ConnID)
-		if s.pendingClose {
-			go func() {
-				s.attemptClosing <- struct{}{}
-			}()
+	if cInfo, ok := s.clientsID[m.ConnID]; ok {
+		cInfo.activeReadFromEpoch = true
+		if m.SeqNum > 0 {
+			cInfo.slideSndr.cackMessage(m.SeqNum)
+			s.checkSendMsg(m.ConnID)
+			if cInfo.slideSndr.empty() {
+				if s.pendingCloseClients[m.ConnID] {
+					s.closeClientNow(m.ConnID)
+				}
+				if s.pendingClose {
+					s.attemptClosingServer()
+				}
+			}
 		}
 	}
 }
@@ -296,22 +295,23 @@ func (s *server) ensureDataValidity(m *Message) bool {
 }
 
 func (s *server) handleData(m *Message) {
-	cInfo := s.clientsID[m.ConnID]
-	cInfo.activeReadFromEpoch = true
-	if !s.ensureDataValidity(m) {
-		return
-	}
-	cInfo.buffRecv.recvMsg(m)
+	if cInfo, ok := s.clientsID[m.ConnID]; ok {
+		cInfo.activeReadFromEpoch = true
+		if !s.ensureDataValidity(m) {
+			return
+		}
+		cInfo.buffRecv.recvMsg(m)
 
-	for cInfo.buffRecv.readyToRead() {
-		s.readyForReadMsg = append(s.readyForReadMsg, cInfo.buffRecv.deliverToRead())
+		for cInfo.buffRecv.readyToRead() {
+			s.readyForReadMsg = append(s.readyForReadMsg, cInfo.buffRecv.deliverToRead())
+		}
+		if s.await && len(s.readyForReadMsg) != 0 {
+			s.readFunctionCallRes <- s.readyForReadMsg[0]
+			s.readyForReadMsg = s.readyForReadMsg[1:]
+			s.await = false
+		}
+		s.ackWriteBack(m.ConnID, m.SeqNum)
 	}
-	if s.await && len(s.readyForReadMsg) != 0 {
-		s.readFunctionCallRes <- s.readyForReadMsg[0]
-		s.readyForReadMsg = s.readyForReadMsg[1:]
-		s.await = false
-	}
-	s.ackWriteBack(m.ConnID, m.SeqNum)
 }
 
 func (s *server) checkSendMsg(id int) {
@@ -324,33 +324,64 @@ func (s *server) checkSendMsg(id int) {
 
 func (s *server) checkConnActivity() {
 	for id, cInfo := range s.clientsID {
-		if !cInfo.activeWroteInEpoch {
-			s.ackWriteBack(id, 0)
-		}
-		if !cInfo.activeReadFromEpoch {
-			cInfo.lastReadEpoch++
-			if cInfo.lastReadEpoch >= s.params.EpochLimit {
-				go func() {
-					if err := s.CloseConn(id); err != nil {
-						return
-					}
-				}()
+		if !cInfo.closed {
+			if !cInfo.activeWroteInEpoch {
+				s.ackWriteBack(id, 0)
 			}
-		} else {
-			cInfo.lastReadEpoch = 0
+			if !cInfo.activeReadFromEpoch {
+				cInfo.lastReadEpoch++
+				if cInfo.lastReadEpoch >= s.params.EpochLimit {
+					s.closeClientNow(id)
+				}
+			} else {
+				cInfo.lastReadEpoch = 0
+			}
+			cInfo.activeWroteInEpoch = false
+			cInfo.activeReadFromEpoch = false
 		}
-		cInfo.activeWroteInEpoch = false
-		cInfo.activeReadFromEpoch = false
+	}
+}
+
+func (s *server) closeClientNow(id int) {
+	s.pendingCloseClients[id] = false
+	s.clientsID[id].closed = true
+	delete(s.clientsAddr, s.clientsID[id].addr.String())
+	delete(s.pendingCloseClients, id)
+	delete(s.clientsID, id)
+
+	s.readyForReadMsg = append(s.readyForReadMsg, &Message{Type: MsgAck, ConnID: id})
+	if s.await {
+		s.readFunctionCallRes <- s.readyForReadMsg[0]
+		s.readyForReadMsg = s.readyForReadMsg[1:]
+		s.await = false
+	}
+}
+
+func (s *server) attemptClosingServer() {
+	emptyPending := true
+	for id := range s.clientsID {
+		if !(s.clientsID[id].closed || s.clientsID[id].slideSndr.empty()) {
+			emptyPending = false
+		}
+	}
+	if emptyPending {
+		s.pendingClose = false
+		s.serverClosed = true
+		go func() {
+			s.stopReadRoutine <- struct{}{}
+			s.stopMain <- struct{}{}
+			s.closeFunctionCallRes <- struct{}{}
+		}()
 	}
 }
 
 func (s *server) Read() (int, []byte, error) {
-	select {
-	case id := <-s.closeClientToRead:
-		return -1, nil, errors.New("connection with client id: " + strconv.Itoa(id) + " is closed")
+	s.readFunctionCall <- struct{}{}
+	m := <-s.readFunctionCallRes
+	switch m.Type {
+	case MsgAck:
+		return -1, nil, errors.New("connection with client id: " + strconv.Itoa(m.ConnID) + " is closed")
 	default:
-		s.readFunctionCall <- struct{}{}
-		m := <-s.readFunctionCallRes
 		return m.ConnID, m.Payload, nil
 	}
 }
@@ -372,12 +403,13 @@ func (s *server) CloseConn(connId int) error {
 	if !res {
 		return errors.New("client ID does not exist")
 	} else {
-		s.closeClient <- connId
+		s.closeClientCall <- connId
 		return nil
 	}
 }
 
 func (s *server) Close() error {
 	s.closeFunctionCall <- struct{}{}
+	<-s.closeFunctionCallRes
 	return nil
 }
