@@ -210,6 +210,9 @@ func (s *server) MainRoutine() {
 			if s.clientsID[id].slideSndr.empty() {
 				s.closeClientNow(id)
 			}
+			if s.pendingClose {
+				s.attemptClosingServer()
+			}
 
 		case <-s.closeFunctionCall:
 			s.pendingClose = true
