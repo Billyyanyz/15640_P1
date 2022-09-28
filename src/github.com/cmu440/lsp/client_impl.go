@@ -26,7 +26,7 @@ type client struct {
 	params      *Params
 	await       bool
 	// Cache
-	sw               slidingWindowSender
+	sw               oldSlidingWindowSender
 	receivedMessages map[int]MessageError
 	writeBuffer      map[int]Message
 	// Signals
@@ -122,7 +122,7 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 	}
 	// Block until we get the first Ack
 	<-c.connectionSuccess
-	sw := newSlidingWindowSender(initialSeqNum, params.WindowSize, params.MaxUnackedMessages)
+	sw := newOldSlidingWindowSender(initialSeqNum, params.WindowSize, params.MaxUnackedMessages)
 	c.sw = sw
 	go c.WriteRoutine()
 	return c, nil

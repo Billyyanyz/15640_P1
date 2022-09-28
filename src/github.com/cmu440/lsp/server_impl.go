@@ -61,7 +61,6 @@ type clientInfo struct {
 	activeWroteInEpoch  bool
 	activeReadFromEpoch bool
 	lastReadEpoch       int
-	closed              bool
 }
 
 func (s *server) newClientInfo(connID int, addr *lspnet.UDPAddr, sn int) *clientInfo {
@@ -70,12 +69,11 @@ func (s *server) newClientInfo(connID int, addr *lspnet.UDPAddr, sn int) *client
 		addr:   addr,
 
 		buffRecv:  newBufferedReceiver(sn),
-		slideSndr: newSlidingWindowSender(sn, s.params.WindowSize, s.params.MaxUnackedMessages),
+		slideSndr: newSlidingWindowSender(sn, s.params.WindowSize, s.params.MaxUnackedMessages, s.params.MaxBackOffInterval),
 
 		activeWroteInEpoch:  false,
 		activeReadFromEpoch: true,
 		lastReadEpoch:       0,
-		closed:              false,
 	}
 
 }
@@ -204,6 +202,7 @@ func (s *server) MainRoutine() {
 		case <-s.epochTimer.C:
 			s.epochCnt++
 			s.checkConnActivity()
+			s.resendUnackedMessage()
 
 		case id := <-s.closeClientCall:
 			s.pendingCloseClients[id] = true
@@ -230,10 +229,9 @@ func (s *server) writeMsg(m *Message, id int) {
 	if _, err = s.udpConn.WriteToUDP(b, cInfo.addr); err != nil {
 		return
 	}
-	cInfo.slideSndr.markMessageSent(m)
 }
 
-func (s *server) ackWriteBack(id int, seqNum int) {
+func (s *server) writeBackAck(id int, seqNum int) {
 	retMessage := NewAck(id, seqNum)
 	s.writeMsg(retMessage, id)
 }
@@ -245,7 +243,7 @@ func (s *server) handleConnect(m *Message, addr *lspnet.UDPAddr) {
 		cInfo := s.clientsID[s.clientsCnt]
 		s.clientsAddr[addr.String()] = cInfo
 		s.pendingCloseClients[s.clientsCnt] = false
-		s.ackWriteBack(cInfo.connID, m.SeqNum)
+		s.writeBackAck(cInfo.connID, m.SeqNum)
 	}
 }
 
@@ -313,7 +311,7 @@ func (s *server) handleData(m *Message) {
 			s.readyForReadMsg = s.readyForReadMsg[1:]
 			s.await = false
 		}
-		s.ackWriteBack(m.ConnID, m.SeqNum)
+		s.writeBackAck(m.ConnID, m.SeqNum)
 	}
 }
 
@@ -322,32 +320,41 @@ func (s *server) checkSendMsg(id int) {
 	if _, m := cInfo.slideSndr.nextMsgToSend(); m != nil {
 		cInfo.activeWroteInEpoch = true
 		s.writeMsg(m, id)
+		cInfo.slideSndr.markNextMessageSent(m, s.epochCnt)
+		// don't put this in writeMsg
+		// it is for all outgoing msg, including resend
+		// will screw up minUnsentSN counter
 	}
 }
 
 func (s *server) checkConnActivity() {
 	for id, cInfo := range s.clientsID {
-		if !cInfo.closed {
-			if !cInfo.activeWroteInEpoch {
-				s.ackWriteBack(id, 0)
+		if !cInfo.activeWroteInEpoch {
+			s.writeBackAck(id, 0)
+		}
+		if !cInfo.activeReadFromEpoch {
+			cInfo.lastReadEpoch++
+			if cInfo.lastReadEpoch >= s.params.EpochLimit {
+				s.closeClientNow(id)
 			}
-			if !cInfo.activeReadFromEpoch {
-				cInfo.lastReadEpoch++
-				if cInfo.lastReadEpoch >= s.params.EpochLimit {
-					s.closeClientNow(id)
-				}
-			} else {
-				cInfo.lastReadEpoch = 0
-			}
-			cInfo.activeWroteInEpoch = false
-			cInfo.activeReadFromEpoch = false
+		} else {
+			cInfo.lastReadEpoch = 0
+		}
+		cInfo.activeWroteInEpoch = false
+		cInfo.activeReadFromEpoch = false
+	}
+}
+
+func (s *server) resendUnackedMessage() {
+	for id, cInfo := range s.clientsID {
+		resendMessageList := cInfo.slideSndr.resendMessageList(s.epochCnt)
+		for _, m := range resendMessageList {
+			s.writeMsg(m, id)
 		}
 	}
 }
 
 func (s *server) closeClientNow(id int) {
-	s.pendingCloseClients[id] = false
-	s.clientsID[id].closed = true
 	delete(s.clientsAddr, s.clientsID[id].addr.String())
 	delete(s.pendingCloseClients, id)
 	delete(s.clientsID, id)
@@ -363,7 +370,7 @@ func (s *server) closeClientNow(id int) {
 func (s *server) attemptClosingServer() {
 	emptyPending := true
 	for id := range s.clientsID {
-		if !(s.clientsID[id].closed || s.clientsID[id].slideSndr.empty()) {
+		if !s.clientsID[id].slideSndr.empty() {
 			emptyPending = false
 		}
 	}
