@@ -106,7 +106,8 @@ func NewServer(port int, params *Params) (Server, error) {
 		writeFunctionCall: make(chan *Message, 1),
 		writeAckCall:      make(chan *Message),
 
-		epochTimer: time.NewTicker(time.Duration(params.EpochMillis)),
+		epochTimer: time.NewTicker(time.Millisecond *
+		              time.Duration(params.EpochMillis)),
 		epochCnt:   0,
 
 		closeClientCall:     make(chan int),

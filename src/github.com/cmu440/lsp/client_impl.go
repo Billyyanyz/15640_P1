@@ -5,8 +5,10 @@ package lsp
 import (
 	"encoding/json"
 	"errors"
+	"strconv"
+	"time"
+
 	"github.com/cmu440/lspnet"
-	// "time"
 )
 
 type ClientState int
@@ -25,10 +27,12 @@ type client struct {
 	udpConn     *lspnet.UDPConn
 	params      *Params
 	await       bool
+
 	// Cache
 	sw               oldSlidingWindowSender
 	receivedMessages map[int]MessageError
 	writeBuffer      map[int]Message
+
 	// Signals
 	stopMainRoutine   chan struct{}
 	stopReadRoutine   chan struct{}
@@ -44,6 +48,10 @@ type client struct {
 	handleServerAckRes   chan struct{}
 	handleServerCAck     chan Message
 	handleServerCAckRes  chan struct{}
+
+	// epoch events
+	epochCnt             int
+	epochTimer           *time.Ticker
 }
 
 type PayloadError struct {
@@ -88,7 +96,6 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 		params:      params,
 		await:       false,
 
-		// sw:                   slidingWindow,
 		receivedMessages: make(map[int]MessageError),
 		writeBuffer:      make(map[int]Message),
 
@@ -106,6 +113,10 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 		handleServerAckRes:   make(chan struct{}),
 		handleServerCAck:     make(chan Message),
 		handleServerCAckRes:  make(chan struct{}),
+
+		epochCnt: 0,
+		epochTimer: time.NewTicker(time.Millisecond *
+		                           time.Duration(params.EpochMillis)),
 	}
 
 	go c.MainRoutine()
@@ -120,11 +131,41 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 	if err != nil {
 		return nil, err
 	}
-	// Block until we get the first Ack
-	<-c.connectionSuccess
+
+	// Block until we get the first Ack or timeout
+	handShakeTicker := time.NewTicker(time.Millisecond *
+	                                  time.Duration(params.EpochMillis))
+	handShakeEpochCnt := 0
+	successFlag := false
+	defer handShakeTicker.Stop()
+	for handShakeEpochCnt <= params.EpochLimit {
+		select {
+		case <-c.connectionSuccess:
+			successFlag = true
+			break
+		case <-handShakeTicker.C:
+			_, err = c.udpConn.Write(connectRawMsg)
+			if err != nil {
+				return nil, err
+			}
+			handShakeEpochCnt++
+			clientImplLog(strconv.Itoa(handShakeEpochCnt))
+		}
+		if successFlag {
+			break
+		}
+	}
+	if handShakeEpochCnt > params.EpochLimit {
+		// Connection timeout
+		return nil, errors.New("Connection handshake timeout")
+		// TODO: Deal with closing connection here
+	}
+
 	sw := newOldSlidingWindowSender(initialSeqNum, params.WindowSize, params.MaxUnackedMessages)
 	c.sw = sw
+
 	go c.WriteRoutine()
+
 	return c, nil
 }
 
@@ -146,6 +187,10 @@ func (c *client) MainRoutine() {
 				return
 			case MsgData:
 				clientImplLog("Reading data message: " + message.String())
+				if !c.ensureDataValidity(&message) {
+					clientImplLog("Corrupted data message, discarding...: " + message.String())
+					continue
+				}
 				c.receivedMessages[message.SeqNum] = me
 				me, found := c.receivedMessages[c.readSeqNum+1]
 				if c.await && found {
@@ -163,6 +208,7 @@ func (c *client) MainRoutine() {
 					c.connID = message.ConnID
 					c.state = CSConnected
 					c.connectionSuccess <- struct{}{}
+					clientImplLog("fwewe")
 					continue
 				}
 				c.handleServerAck <- message
@@ -182,7 +228,6 @@ func (c *client) MainRoutine() {
 			me, found := c.receivedMessages[c.readSeqNum+1]
 			if !found {
 				c.await = true
-				// c.readFunctionCallRes <- nil
 			} else {
 				delete(c.receivedMessages, c.readSeqNum+1)
 				c.readSeqNum++
@@ -195,13 +240,21 @@ func (c *client) MainRoutine() {
 	}
 }
 
-func (c *client) ProcessReceivedMessage() *MessageError {
-	for sn, me := range c.receivedMessages {
-		if sn == c.readSeqNum+1 {
-			return &me
-		}
+func (c *client) handleEpoch() {
+	clientImplLog("Epoch " + strconv.Itoa(c.epochCnt))
+	c.epochCnt++
+}
+
+func (c *client) ensureDataValidity(m *Message) bool {
+	if len(m.Payload) > m.Size {
+		return false
+	} else if len(m.Payload) < m.Size {
+		m.Payload = m.Payload[:m.Size]
 	}
-	return nil
+	if CalculateChecksum(m.ConnID, m.SeqNum, m.Size, m.Payload) != m.Checksum {
+		return false
+	}
+	return true
 }
 
 func (c *client) ReadRoutine() {
