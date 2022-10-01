@@ -50,9 +50,14 @@ type client struct {
 	handleServerCAckRes  chan struct{}
 
 	// epoch events
-	epochCnt             int
-	epochTimer           *time.Ticker
-	epochSinceLast       int
+	epochCnt       int
+	epochTimer     *time.Ticker
+	epochSinceLast int
+	// Only WriteRoutine can touch the following
+	sentState     bool // Any message sent last epoch?
+	sentStateChan chan bool
+	getSentState  chan struct{}
+	setSentState  chan bool
 }
 
 type PayloadError struct {
@@ -116,8 +121,12 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 
 		epochCnt: 0,
 		epochTimer: time.NewTicker(time.Millisecond *
-		                           time.Duration(params.EpochMillis)),
+			time.Duration(params.EpochMillis)),
 		epochSinceLast: 0,
+		sentState:      false,
+		sentStateChan:  make(chan bool),
+		getSentState:   make(chan struct{}),
+		setSentState:   make(chan bool),
 	}
 
 	go c.MainRoutine()
@@ -135,7 +144,7 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 
 	// Block until we get the first Ack or timeout
 	handShakeTicker := time.NewTicker(time.Millisecond *
-	                                  time.Duration(params.EpochMillis))
+		time.Duration(params.EpochMillis))
 	handShakeEpochCnt := 0
 	successFlag := false
 	defer handShakeTicker.Stop()
@@ -163,12 +172,11 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 	}
 
 	sw := newOldSlidingWindowSender(initialSeqNum,
-	                                params.WindowSize,
-					params.MaxUnackedMessages)
+		params.WindowSize,
+		params.MaxUnackedMessages)
 	c.sw = sw
 
 	go c.WriteRoutine()
-
 	return c, nil
 }
 
@@ -192,7 +200,7 @@ func (c *client) MainRoutine() {
 				}
 			}
 		case <-c.epochTimer.C:
-			timeout := c.handleEpoch()
+			timeout := c.clientEpochTick()
 			if timeout {
 				return
 				// TODO: Deal with closing
@@ -219,8 +227,8 @@ func (c *client) processReceivedMsg(me MessageError) {
 		clientImplLog("Reading data message: " + message.String())
 		if !c.ensureDataValidity(&message) {
 			clientImplLog("Corrupted data message, discarding...: " +
-			               message.String())
-			// TODO
+				message.String())
+				// TODO: Close
 			return
 		}
 		c.receivedMessages[message.SeqNum] = me
@@ -242,6 +250,11 @@ func (c *client) processReceivedMsg(me MessageError) {
 			c.connectionSuccess <- struct{}{}
 			return
 		}
+		if message.SeqNum == 0 {
+			// Server heartbeat, no need to change SW
+			clientImplLog("Server heartbeat: " + message.String())
+			return
+		}
 		c.handleServerAck <- message
 		<-c.handleServerAckRes
 	case MsgCAck:
@@ -259,7 +272,7 @@ func (c *client) processReceivedMsg(me MessageError) {
 
 // Epoch tick hitting our client, return whether the server has timeout
 // Can only be called from client MainRoutine
-func (c *client) handleEpoch() bool {
+func (c *client) clientEpochTick() bool {
 	clientImplLog("Client epoch " + strconv.Itoa(c.epochCnt))
 	c.epochCnt++
 	c.epochSinceLast++
@@ -267,7 +280,14 @@ func (c *client) handleEpoch() bool {
 		return true
 	}
 	clientImplLog("Remaining epoches to waste: " +
-	               strconv.Itoa(c.params.EpochLimit - c.epochSinceLast))
+		strconv.Itoa(c.params.EpochLimit-c.epochSinceLast))
+	c.getSentState <- struct{}{}
+	s := <-c.sentStateChan
+	if !s {
+		// Heartbeat
+		c.writeAck <- *NewAck(c.connID, 0)
+	}
+	c.setSentState <- false
 	return false
 }
 
@@ -311,48 +331,59 @@ func (c *client) WriteRoutine() {
 			seqNum := c.sw.getSeqNum()
 			writeSize := len(payload)
 			checkSum := CalculateChecksum(c.connID,
-			                              seqNum,
-						      writeSize,
-						      payload)
+				seqNum,
+				writeSize,
+				payload)
 			writeMsg := NewData(c.connID,
-			                    seqNum,
-					    writeSize,
-					    payload,
-					    checkSum)
+				seqNum,
+				writeSize,
+				payload,
+				checkSum)
 			clientImplLog("Backing up message: " + string(writeMsg.String()))
 			c.sw.backupUnsentMsg(writeMsg)
 			c.writeFunctionCallRes <- nil
-			c.checkSendMsg()
+			c.sendMessagefromSW()
 			// TODO: What to return when there's an error?
 		case message := <-c.writeAck:
 			writeMsg := NewAck(message.ConnID, message.SeqNum)
-			clientImplLog("Ack'ing to server: " + string(writeMsg.String()))
+			if message.SeqNum != 0 {
+				clientImplLog("Ack'ing to server: " +
+					string(writeMsg.String()))
+			} else {
+				clientImplLog("Client heartbeat: " +
+					string(writeMsg.String()))
+			}
 			b, err := json.Marshal(writeMsg)
 			if err != nil {
 				clientImplLog("Error when Ack'ing to server: " +
-				               err.Error())
+					err.Error())
 				//TODO: DONT RETURN
 				return
 			}
 			_, err = c.udpConn.Write(b)
 			if err != nil {
 				clientImplLog("Error when Ack'ing to server: " +
-			                       err.Error())
+					err.Error())
 				return
 			}
+			c.sentState = true
 		case message := <-c.handleServerAck:
 			c.sw.ackMessage(message.SeqNum)
+			c.sendMessagefromSW()
 			c.handleServerAckRes <- struct{}{}
-			c.checkSendMsg()
 		case message := <-c.handleServerCAck:
 			c.sw.cackMessage(message.SeqNum)
+			c.sendMessagefromSW()
 			c.handleServerCAckRes <- struct{}{}
-			c.checkSendMsg()
+		case <-c.getSentState:
+			c.sentStateChan <- c.sentState
+		case s := <-c.setSentState:
+			c.sentState = s
 		}
 	}
 }
 
-func (c *client) checkSendMsg() {
+func (c *client) sendMessagefromSW() {
 	_, writeMsg := c.sw.nextMsgToSend()
 	if writeMsg == nil {
 		return
@@ -370,6 +401,7 @@ func (c *client) checkSendMsg() {
 	}
 	// TODO: Handle the error here
 	c.sw.markMessageSent(writeMsg)
+	c.sentState = true
 }
 
 func (c *client) ConnID() int {
