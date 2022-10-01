@@ -41,8 +41,8 @@ type client struct {
 	readFunctionCall     chan struct{}
 	readMessageGeneral   chan MessageError
 	readFunctionCallRes  chan *PayloadError
-	writeAck             chan Message // We wake up write routine to Ack server's packet
-	writeFunctionCall    chan []byte  // User wakes up write routine
+	writeAck             chan Message // Wake up WriteRoutine to Ack server's packet
+	writeFunctionCall    chan []byte
 	writeFunctionCallRes chan error
 	handleServerAck      chan Message
 	handleServerAckRes   chan struct{}
@@ -52,6 +52,7 @@ type client struct {
 	// epoch events
 	epochCnt             int
 	epochTimer           *time.Ticker
+	epochSinceLast       int
 }
 
 type PayloadError struct {
@@ -86,7 +87,6 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 		return nil, err
 	}
 
-	// slidingWindow := newSlidingWindowSender(0, params.WindowSize, params.MaxUnackedMessages)
 	c := &client{
 		connID:      0,
 		readSeqNum:  initialSeqNum,
@@ -117,6 +117,7 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 		epochCnt: 0,
 		epochTimer: time.NewTicker(time.Millisecond *
 		                           time.Duration(params.EpochMillis)),
+		epochSinceLast: 0,
 	}
 
 	go c.MainRoutine()
@@ -147,9 +148,9 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 			_, err = c.udpConn.Write(connectRawMsg)
 			if err != nil {
 				return nil, err
+				// TODO: Deal with closing connection here
 			}
 			handShakeEpochCnt++
-			clientImplLog(strconv.Itoa(handShakeEpochCnt))
 		}
 		if successFlag {
 			break
@@ -161,7 +162,9 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 		// TODO: Deal with closing connection here
 	}
 
-	sw := newOldSlidingWindowSender(initialSeqNum, params.WindowSize, params.MaxUnackedMessages)
+	sw := newOldSlidingWindowSender(initialSeqNum,
+	                                params.WindowSize,
+					params.MaxUnackedMessages)
 	c.sw = sw
 
 	go c.WriteRoutine()
@@ -175,55 +178,7 @@ func (c *client) MainRoutine() {
 		case <-c.stopMainRoutine:
 			return
 		case me := <-c.readMessageGeneral:
-			message := me.message
-			err := me.err
-			clientImplLog("Reading message: " + message.String())
-			if err != nil {
-				clientImplLog("Error: " + err.Error())
-			}
-			switch message.Type {
-			case MsgConnect:
-				clientImplLog("--PANIC-- Client receives connect message!")
-				return
-			case MsgData:
-				clientImplLog("Reading data message: " + message.String())
-				if !c.ensureDataValidity(&message) {
-					clientImplLog("Corrupted data message, discarding...: " + message.String())
-					continue
-				}
-				c.receivedMessages[message.SeqNum] = me
-				me, found := c.receivedMessages[c.readSeqNum+1]
-				if c.await && found {
-					delete(c.receivedMessages, c.readSeqNum+1)
-					c.readSeqNum++
-					c.readFunctionCallRes <- &PayloadError{
-						me.message.Payload,
-						me.err,
-					}
-				}
-				c.writeAck <- message
-			case MsgAck:
-				clientImplLog("Reading Ack message: " + message.String())
-				if c.state == CSInit {
-					c.connID = message.ConnID
-					c.state = CSConnected
-					c.connectionSuccess <- struct{}{}
-					clientImplLog("fwewe")
-					continue
-				}
-				c.handleServerAck <- message
-				<-c.handleServerAckRes
-			case MsgCAck:
-				clientImplLog("Reading CAck message: " + message.String())
-				if c.state == CSInit {
-					c.connID = message.ConnID
-					c.state = CSConnected
-					c.connectionSuccess <- struct{}{}
-					continue
-				}
-				c.handleServerCAck <- message
-				<-c.handleServerCAckRes
-			}
+			c.processReceivedMsg(me)
 		case <-c.readFunctionCall:
 			me, found := c.receivedMessages[c.readSeqNum+1]
 			if !found {
@@ -236,13 +191,84 @@ func (c *client) MainRoutine() {
 					me.err,
 				}
 			}
+		case <-c.epochTimer.C:
+			timeout := c.handleEpoch()
+			if timeout {
+				return
+				// TODO: Deal with closing
+			}
 		}
 	}
 }
 
-func (c *client) handleEpoch() {
-	clientImplLog("Epoch " + strconv.Itoa(c.epochCnt))
+// Process a message received from client ReadRoutine
+// Can only be called from client MainRoutine
+func (c *client) processReceivedMsg(me MessageError) {
+	message := me.message
+	err := me.err
+	clientImplLog("Reading message: " + message.String())
+	if err != nil {
+		clientImplLog("Error: " + err.Error())
+	}
+	c.epochSinceLast = 0
+	switch message.Type {
+	case MsgConnect:
+		clientImplLog("--PANIC-- Client receives connect message!")
+		return
+	case MsgData:
+		clientImplLog("Reading data message: " + message.String())
+		if !c.ensureDataValidity(&message) {
+			clientImplLog("Corrupted data message, discarding...: " +
+			               message.String())
+			// TODO
+			return
+		}
+		c.receivedMessages[message.SeqNum] = me
+		me, found := c.receivedMessages[c.readSeqNum+1]
+		if c.await && found {
+			delete(c.receivedMessages, c.readSeqNum+1)
+			c.readSeqNum++
+			c.readFunctionCallRes <- &PayloadError{
+				me.message.Payload,
+				me.err,
+			}
+		}
+		c.writeAck <- message
+	case MsgAck:
+		clientImplLog("Reading Ack message: " + message.String())
+		if c.state == CSInit {
+			c.connID = message.ConnID
+			c.state = CSConnected
+			c.connectionSuccess <- struct{}{}
+			return
+		}
+		c.handleServerAck <- message
+		<-c.handleServerAckRes
+	case MsgCAck:
+		clientImplLog("Reading CAck message: " + message.String())
+		if c.state == CSInit {
+			c.connID = message.ConnID
+			c.state = CSConnected
+			c.connectionSuccess <- struct{}{}
+			return
+		}
+		c.handleServerCAck <- message
+		<-c.handleServerCAckRes
+	}
+}
+
+// Epoch tick hitting our client, return whether the server has timeout
+// Can only be called from client MainRoutine
+func (c *client) handleEpoch() bool {
+	clientImplLog("Client epoch " + strconv.Itoa(c.epochCnt))
 	c.epochCnt++
+	c.epochSinceLast++
+	if c.epochSinceLast > c.params.EpochLimit {
+		return true
+	}
+	clientImplLog("Remaining epoches to waste: " +
+	               strconv.Itoa(c.params.EpochLimit - c.epochSinceLast))
+	return false
 }
 
 func (c *client) ensureDataValidity(m *Message) bool {
@@ -284,8 +310,15 @@ func (c *client) WriteRoutine() {
 		case payload := <-c.writeFunctionCall:
 			seqNum := c.sw.getSeqNum()
 			writeSize := len(payload)
-			checkSum := CalculateChecksum(c.connID, seqNum, writeSize, payload)
-			writeMsg := NewData(c.connID, seqNum, writeSize, payload, checkSum)
+			checkSum := CalculateChecksum(c.connID,
+			                              seqNum,
+						      writeSize,
+						      payload)
+			writeMsg := NewData(c.connID,
+			                    seqNum,
+					    writeSize,
+					    payload,
+					    checkSum)
 			clientImplLog("Backing up message: " + string(writeMsg.String()))
 			c.sw.backupUnsentMsg(writeMsg)
 			c.writeFunctionCallRes <- nil
@@ -296,13 +329,15 @@ func (c *client) WriteRoutine() {
 			clientImplLog("Ack'ing to server: " + string(writeMsg.String()))
 			b, err := json.Marshal(writeMsg)
 			if err != nil {
-				clientImplLog("Error when Ack'ing to server: " + err.Error())
+				clientImplLog("Error when Ack'ing to server: " +
+				               err.Error())
 				//TODO: DONT RETURN
 				return
 			}
 			_, err = c.udpConn.Write(b)
 			if err != nil {
-				clientImplLog("Error when Ack'ing to server: " + err.Error())
+				clientImplLog("Error when Ack'ing to server: " +
+			                       err.Error())
 				return
 			}
 		case message := <-c.handleServerAck:
