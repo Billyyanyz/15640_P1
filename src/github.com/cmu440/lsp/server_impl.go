@@ -5,9 +5,10 @@ package lsp
 import (
 	"encoding/json"
 	"errors"
-	"github.com/cmu440/lspnet"
 	"strconv"
 	"time"
+
+	"github.com/cmu440/lspnet"
 )
 
 type server struct {
@@ -174,7 +175,7 @@ func (s *server) MainRoutine() {
 		case mwa := <-s.newClientConnecting:
 			s.handleConnect(mwa.message, mwa.addr)
 		case m := <-s.newAck:
-			s.handleCAck(m)
+			s.handleAck(m)
 		case m := <-s.newCAck:
 			s.handleCAck(m)
 		case m := <-s.newDataReceiving:
@@ -350,6 +351,7 @@ func (s *server) resendUnackedMessage() {
 	for id, cInfo := range s.clientsID {
 		resendMessageList := cInfo.slideSndr.resendMessageList(s.epochCnt)
 		for _, m := range resendMessageList {
+			serverImplLog("Resending " + m.String())
 			s.writeMsg(m, id)
 		}
 	}
