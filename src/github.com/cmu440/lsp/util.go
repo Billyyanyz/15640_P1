@@ -5,7 +5,7 @@ import (
 )
 
 const (
-	log   = false
+	log   = true
 	fatal = true // Always set to true
 )
 

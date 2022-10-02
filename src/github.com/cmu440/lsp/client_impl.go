@@ -56,7 +56,7 @@ type client struct {
 	epochCnt       int
 	epochTimer     *time.Ticker
 	epochSinceLast int
-	sentState bool // Any message sent last epoch?
+	sentState      bool // Any message sent last epoch?
 }
 
 type PayloadError struct {
@@ -381,11 +381,12 @@ func (c *client) ReadRoutine() {
 			if err != nil {
 				clientImplFatal("Error reading from UDP: " + err.Error())
 				me.err = err
-			}
-			err = json.Unmarshal(rawMsg[:n], &me.message)
-			if err != nil {
-				clientImplFatal("Error Unmarshal: " + err.Error())
-				me.err = err
+			} else {
+				err = json.Unmarshal(rawMsg[:n], &me.message)
+				if err != nil {
+					clientImplFatal("Error Unmarshal: " + err.Error())
+					me.err = err
+				}
 			}
 			c.readMessageGeneral <- me
 		}
@@ -411,7 +412,6 @@ func (c *client) sendMessagefromSW(epoch int) error {
 			string(writeMsg.String()))
 		ret = err
 	}
-	clientImplLog("before fetching epoch cnt")
 	c.sw.markNextMessageSent(writeMsg, epoch)
 	c.sentState = true
 	return ret
@@ -449,7 +449,10 @@ func (c *client) Write(payload []byte) error {
 }
 
 func (c *client) Close() error {
-	c.stopReadRoutine <- struct{}{}
-	c.stopMainRoutine <- struct{}{}
-	return c.udpConn.Close()
+	go func() {
+		c.stopReadRoutine <- struct{}{}
+		c.stopMainRoutine <- struct{}{}
+		c.udpConn.Close()
+	}()
+	return nil
 }
