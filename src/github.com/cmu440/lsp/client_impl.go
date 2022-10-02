@@ -122,6 +122,7 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 
 		stopMainRoutine:   make(chan struct{}),
 		stopReadRoutine:   make(chan struct{}),
+		stopWriteRoutine:  make(chan struct{}),
 		connectionSuccess: make(chan struct{}),
 
 		readFunctionCall:     make(chan struct{}),
