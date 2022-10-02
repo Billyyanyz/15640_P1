@@ -56,8 +56,8 @@ type client struct {
 	epochTimer     *time.Ticker
 	epochSinceLast int
 	getEpochCnt    chan struct{} // write -> main
-	epochCntChan   chan int // main -> write
-	resend         chan int // main -> write
+	epochCntChan   chan int      // main -> write
+	resend         chan int      // main -> write
 	// Only WriteRoutine can touch the following
 	sentState     bool // Any message sent last epoch?
 	sentStateChan chan bool
@@ -77,12 +77,12 @@ type MessageError struct {
 
 type PayloadEpoch struct {
 	payload []byte
-	epoch int
+	epoch   int
 }
 
 type MessageEpoch struct {
 	message Message
-	epoch int
+	epoch   int
 }
 
 // NewClient creates, initiates, and returns a new client. This function
@@ -194,7 +194,7 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 	sw := newSlidingWindowSender(initialSeqNum,
 		params.WindowSize,
 		params.MaxUnackedMessages,
-	        params.MaxBackOffInterval)
+		params.MaxBackOffInterval)
 	c.sw = sw
 
 	go c.WriteRoutine()
@@ -272,6 +272,7 @@ func (c *client) processReceivedMsg(me MessageError) int {
 				me.message.Payload,
 				me.err,
 			}
+			c.await = false
 		}
 		c.writeAck <- message
 	case MsgAck:
@@ -323,7 +324,7 @@ func (c *client) clientEpochTick() bool {
 	}
 	c.setSentState <- false
 	// Resend all Unacked messages
-	c.resend <- c.epochCnt 
+	//c.resend <- c.epochCnt
 	return false
 }
 
@@ -379,15 +380,18 @@ func (c *client) WriteRoutine() {
 				payload,
 				checkSum)
 			clientImplLog("Backing up message: " +
-		                string(writeMsg.String()))
+				string(writeMsg.String()))
 			c.sw.backupUnsentMsg(writeMsg)
 			// We should only get epoch count from MainRoutine if
 			// the WriteRoutine code is not generated from
 			// MainRoutine. Otherwise we will deadlock. This
 			// probably means WriteRoutine is utterly useless.
-			c.getEpochCnt <- struct{}{}
-			epoch := <-c.epochCntChan
-			err := c.sendMessagefromSW(epoch)
+			clientImplLog("Get Epoch count" + writeMsg.String())
+			//c.getEpochCnt <- struct{}{}
+			clientImplLog("Received Epoch count" + writeMsg.String())
+			//epoch := <-c.epochCntChan
+			//err := c.sendMessagefromSW(epoch)
+			err := c.sendMessagefromSW(10000)
 			c.writeFunctionCallRes <- err
 		case message := <-c.writeAck:
 			writeMsg := NewAck(message.ConnID, message.SeqNum)

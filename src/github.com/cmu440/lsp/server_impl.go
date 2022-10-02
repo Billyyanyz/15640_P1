@@ -107,8 +107,8 @@ func NewServer(port int, params *Params) (Server, error) {
 		writeAckCall:      make(chan *Message),
 
 		epochTimer: time.NewTicker(time.Millisecond *
-		              time.Duration(params.EpochMillis)),
-		epochCnt:   0,
+			time.Duration(params.EpochMillis)),
+		epochCnt: 0,
 
 		closeClientCall:     make(chan int),
 		pendingCloseClients: make(map[int]bool),
@@ -409,14 +409,15 @@ func (s *server) Write(connId int, payload []byte) error {
 }
 
 func (s *server) CloseConn(connId int) error {
-	s.checkIDCall <- connId
-	res := <-s.checkIDCallRes
-	if !res {
-		return errors.New("client ID does not exist")
-	} else {
-		s.closeClientCall <- connId
-		return nil
-	}
+	//s.checkIDCall <- connId
+	//res := <-s.checkIDCallRes
+	//if !res {
+	//	return errors.New("client ID does not exist")
+	//} else {
+	//	s.closeClientCall <- connId
+	//	return nil
+	//}
+	return nil
 }
 
 func (s *server) Close() error {
