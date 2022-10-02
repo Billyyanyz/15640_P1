@@ -70,7 +70,16 @@ func (w *slidingWindowSender) ackMessage(sn int) {
 	if _, ok := w.unAckedList[sn]; ok {
 		delete(w.unAckedList, sn)
 		if sn == w.l {
-			w.l++
+			var i int = sn
+			for i < w.minUnsentSN {
+				_, found := w.unAckedList[i]
+				if found {
+					break
+				} else {
+					w.l++
+				}
+				i++
+			}
 		}
 	}
 }
@@ -93,7 +102,7 @@ func (w *slidingWindowSender) empty() bool {
 func (w *slidingWindowSender) resendMessageList(epochCnt int) []*Message {
 	res := make([]*Message, 0)
 	for _, mwb := range w.unAckedList {
-		if epochCnt == mwb.lastSentEpoch+mwb.currentBackoff+1 {
+		if epochCnt >= mwb.lastSentEpoch+mwb.currentBackoff+1 {
 			res = append(res, mwb.message)
 			mwb.lastSentEpoch = epochCnt
 			if mwb.currentBackoff == 0 {
