@@ -19,6 +19,11 @@ const (
 	CSClosing
 )
 
+const (
+	EFATAL = 1
+	EAGAIN = 2
+)
+
 type client struct {
 	// States
 	connID      int
@@ -38,6 +43,8 @@ type client struct {
 	stopMainRoutine   chan struct{}
 	stopReadRoutine   chan struct{}
 	connectionSuccess chan struct{}
+	pauseReading      chan struct{}
+	restartReading    chan struct{}
 
 	readFunctionCall     chan struct{}
 	readMessageGeneral   chan MessageError
@@ -49,7 +56,6 @@ type client struct {
 	epochCnt       int
 	epochTimer     *time.Ticker
 	epochSinceLast int
-	// Only WriteRoutine can touch the following
 	sentState bool // Any message sent last epoch?
 }
 
@@ -101,6 +107,8 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 		stopMainRoutine:   make(chan struct{}),
 		stopReadRoutine:   make(chan struct{}),
 		connectionSuccess: make(chan struct{}),
+		pauseReading:      make(chan struct{}),
+		restartReading:    make(chan struct{}),
 
 		readFunctionCall:     make(chan struct{}),
 		readMessageGeneral:   make(chan MessageError),
@@ -175,10 +183,11 @@ func (c *client) MainRoutine() {
 				return
 			} else {
 				c.state = CSClosing
+				return
 			}
 		case me := <-c.readMessageGeneral:
-			ret := c.processReceivedMsg(me)
-			if ret < 0 {
+			ret := c.processReceivedMsg(&me)
+			if ret == -EFATAL {
 				c.udpConn.Close()
 				return
 			}
@@ -225,20 +234,28 @@ func (c *client) MainRoutine() {
 }
 
 // Process a message received from client ReadRoutine
-// Return 0 for success, negative for failure
+// Return 0 for success, for failure
 // Can only be called from client MainRoutine
-func (c *client) processReceivedMsg(me MessageError) int {
+func (c *client) processReceivedMsg(me *MessageError) int {
 	message := me.message
 	err := me.err
-	clientImplLog("Reading message: " + message.String())
-	if err != nil {
-		clientImplLog("Error: " + err.Error())
+	if message == nil && err != nil {
+		if c.state == CSInit {
+			// Connection not established, client waits for server
+			// util timeout
+			clientImplFatal("Error processing msg: " + err.Error())
+			return -EAGAIN
+		} else {
+			clientImplFatal("Error processing msg: " + err.Error())
+			return -EFATAL
+		}
 	}
+	clientImplLog("Reading message: " + message.String())
 	c.epochSinceLast = 0
 	switch message.Type {
 	case MsgConnect:
 		clientImplFatal("Client receives connect message!")
-		return -1
+		return EFATAL
 	case MsgData:
 		clientImplLog("Reading data message: " + message.String())
 		if !c.ensureDataValidity(message) {
@@ -247,7 +264,7 @@ func (c *client) processReceivedMsg(me MessageError) int {
 			// Deal as if it succeeded
 			return 0
 		}
-		c.receivedMessages[message.SeqNum] = me
+		c.receivedMessages[message.SeqNum] = *me
 		me, found := c.receivedMessages[c.readSeqNum+1]
 		if c.await && found {
 			delete(c.receivedMessages, c.readSeqNum+1)
@@ -262,7 +279,7 @@ func (c *client) processReceivedMsg(me MessageError) int {
 		err := c.sendMessage(writeMsg)
 		if err != nil {
 			clientImplFatal("Error sending Ack to server: " + writeMsg.String())
-			return -1
+			return -EFATAL
 		}
 	case MsgAck:
 		clientImplLog("Reading Ack message: " + message.String())
@@ -281,7 +298,7 @@ func (c *client) processReceivedMsg(me MessageError) int {
 		err := c.sendMessagefromSW(c.epochCnt)
 		if err != nil {
 			clientImplFatal("Failed after receiving Ack: " + message.String())
-			return -1
+			return -EFATAL
 		}
 	case MsgCAck:
 		clientImplLog("Reading CAck message: " + message.String())
@@ -295,7 +312,7 @@ func (c *client) processReceivedMsg(me MessageError) int {
 		err := c.sendMessagefromSW(c.epochCnt)
 		if err != nil {
 			clientImplFatal("Failed after receiving CAck: " + message.String())
-			return -1
+			return -EFATAL
 		}
 	}
 	return 0
@@ -359,12 +376,15 @@ func (c *client) ReadRoutine() {
 		default:
 			rawMsg := make([]byte, 2048)
 			var me MessageError
+			me.message = nil
 			n, _, err := c.udpConn.ReadFromUDP(rawMsg)
 			if err != nil {
+				clientImplFatal("Error reading from UDP: " + err.Error())
 				me.err = err
 			}
 			err = json.Unmarshal(rawMsg[:n], &me.message)
 			if err != nil {
+				clientImplFatal("Error Unmarshal: " + err.Error())
 				me.err = err
 			}
 			c.readMessageGeneral <- me
