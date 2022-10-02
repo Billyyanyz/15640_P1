@@ -286,9 +286,9 @@ func (s *server) handleCAck(m *Message) {
 }
 
 func (s *server) ensureDataValidity(m *Message) bool {
-	if len(m.Payload) > m.Size {
+	if len(m.Payload) < m.Size {
 		return false
-	} else if len(m.Payload) < m.Size {
+	} else if len(m.Payload) > m.Size {
 		m.Payload = m.Payload[:m.Size]
 	}
 	if CalculateChecksum(m.ConnID, m.SeqNum, m.Size, m.Payload) != m.Checksum {

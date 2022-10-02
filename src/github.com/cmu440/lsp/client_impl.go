@@ -59,7 +59,7 @@ type PayloadError struct {
 }
 
 type MessageError struct {
-	message Message
+	message *Message
 	err     error
 }
 
@@ -241,7 +241,7 @@ func (c *client) processReceivedMsg(me MessageError) int {
 		return -1
 	case MsgData:
 		clientImplLog("Reading data message: " + message.String())
-		if !c.ensureDataValidity(&message) {
+		if !c.ensureDataValidity(message) {
 			clientImplLog("Corrupted data message, discarding...: " +
 				message.String())
 			// Deal as if it succeeded
@@ -339,9 +339,9 @@ func (c *client) clientEpochTick() bool {
 }
 
 func (c *client) ensureDataValidity(m *Message) bool {
-	if len(m.Payload) > m.Size {
+	if len(m.Payload) < m.Size {
 		return false
-	} else if len(m.Payload) < m.Size {
+	} else if len(m.Payload) > m.Size {
 		m.Payload = m.Payload[:m.Size]
 	}
 	if CalculateChecksum(m.ConnID, m.SeqNum, m.Size, m.Payload) != m.Checksum {
