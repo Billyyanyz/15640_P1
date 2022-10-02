@@ -16,8 +16,8 @@ type slidingWindowSender struct {
 	minUnsentSN   int
 	nextSN        int
 	size          int
-	unAckedList   map[int]messageWithBackoff // [l, minUnsentSN)
-	unsentData    map[int]*Message           // [minUnsentSN, nextSN)
+	unAckedList   map[int]*messageWithBackoff // [l, minUnsentSN)
+	unsentData    map[int]*Message            // [minUnsentSN, nextSN)
 	maxUnackedMsg int
 	maxBackoff    int
 }
@@ -29,7 +29,7 @@ func newSlidingWindowSender(sn int, windowSize int, maxUnackedMsg int, maxBackof
 		minUnsentSN:   sn + 1,
 		nextSN:        sn + 1,
 		size:          windowSize,
-		unAckedList:   make(map[int]messageWithBackoff),
+		unAckedList:   make(map[int]*messageWithBackoff),
 		unsentData:    make(map[int]*Message),
 		maxUnackedMsg: maxUnackedMsg,
 		maxBackoff:    maxBackoff,
@@ -62,7 +62,7 @@ func (w *slidingWindowSender) backupUnsentMsg(m *Message) {
 
 func (w *slidingWindowSender) markNextMessageSent(m *Message, e int) {
 	delete(w.unsentData, w.minUnsentSN)
-	w.unAckedList[m.SeqNum] = messageWithBackoff{m, e, 0}
+	w.unAckedList[m.SeqNum] = &messageWithBackoff{m, e, 0}
 	w.minUnsentSN++
 }
 
@@ -71,14 +71,13 @@ func (w *slidingWindowSender) ackMessage(sn int) {
 		delete(w.unAckedList, sn)
 		if sn == w.l {
 			var i int = sn
-			for i < w.minUnsentSN {
+			for ; i < w.minUnsentSN; i++ {
 				_, found := w.unAckedList[i]
 				if found {
 					break
 				} else {
 					w.l++
 				}
-				i++
 			}
 		}
 	}
@@ -90,8 +89,18 @@ func (w *slidingWindowSender) cackMessage(sn int) {
 			delete(w.unAckedList, i)
 		}
 	}
+
 	if w.l <= sn {
-		w.l = sn + 1
+		w.l = sn
+		var i int = sn
+		for ; i < w.minUnsentSN; i++ {
+			_, found := w.unAckedList[i]
+			if found {
+				break
+			} else {
+				w.l++
+			}
+		}
 	}
 }
 
