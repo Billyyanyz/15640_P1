@@ -34,7 +34,7 @@ func clientImplFatal(s string) {
 
 func serverImplLog(s string) {
 	if log {
-		fmt.Printf("[server_impl] %s\n", s)
+		fmt.Printf("%s[server_impl]: %s\n%s", Green, s, Reset)
 	}
 }
 
