@@ -230,12 +230,19 @@ func (c *client) MainRoutine() {
 
 		if c.state == CSClosed {
 			c.udpConn.Close()
+			clientImplLog("Closing main routine")
 			return
 		}
 
 		select {
 		case <-c.closeFunctionCall:
-			c.state = CSClosing
+			clientImplLog("Received Close() signal")
+			if c.sw.empty() {
+				c.state = CSClosed
+			} else {
+				c.state = CSClosing
+			}
+			c.notifyCloseCaller = true
 		case me := <-c.readMessageGeneral:
 			ret := c.processReceivedMsg(&me)
 			if ret == -EFATAL {
@@ -271,7 +278,6 @@ func (c *client) handleWriteFunctionCall(payload []byte) error {
 	writeSize := len(payload)
 	checkSum := CalculateChecksum(c.connID, seqNum, writeSize, payload)
 	writeMsg := NewData(c.connID, seqNum, writeSize, payload, checkSum)
-	clientImplLog("Backing up message: " + string(writeMsg.String()))
 	c.sw.backupUnsentMsg(writeMsg)
 	return c.sendMessagefromSW(c.epochCnt)
 }
@@ -286,14 +292,13 @@ func (c *client) processReceivedMsg(me *MessageError) int {
 		if c.state == CSInit {
 			// Connection not established, client waits for server
 			// until timeout
-			clientImplFatal("Error processing msg: " + err.Error())
+			clientImplLog("Error processing msg: " + err.Error())
 			return -EAGAIN
 		} else {
 			clientImplFatal("Error processing msg: " + err.Error())
 			return -EFATAL
 		}
 	}
-	clientImplLog("Reading message: " + message.String())
 	c.epochSinceLast = 0
 	switch message.Type {
 	case MsgConnect:
@@ -379,7 +384,7 @@ func (c *client) clientEpochTick() bool {
 		clientImplFatal("Server timeout ")
 		return false
 	}
-	clientImplLog("Remaining epoches to waste: " +
+	clientImplLog("Remaining epoches before server timeout: " +
 		strconv.Itoa(c.params.EpochLimit-c.epochSinceLast))
 	if !c.sentState { // Heartbeat
 		writeMsg := NewAck(c.connID, 0)
@@ -518,9 +523,9 @@ func (c *client) Write(payload []byte) error {
 }
 
 func (c *client) Close() error {
-	go func() {
-		c.closeFunctionCall <- struct{}{}
-		<-c.closeFunctionCallRes
-	}()
+	// go func() {
+	c.closeFunctionCall <- struct{}{}
+	<-c.closeFunctionCallRes
+	// }()
 	return nil
 }
