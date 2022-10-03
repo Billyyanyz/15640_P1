@@ -323,9 +323,6 @@ func (s *server) checkSendMsg(id int) {
 		cInfo.activeWroteInEpoch = true
 		s.writeMsg(m, id)
 		cInfo.slideSndr.markNextMessageSent(m, s.epochCnt)
-		// don't put this in writeMsg
-		// it is for all outgoing msg, including resend
-		// will screw up minUnsentSN counter
 	}
 }
 
@@ -381,6 +378,8 @@ func (s *server) attemptClosingServer() {
 		s.pendingClose = false
 		s.serverClosed = true
 		go func() {
+			if err := s.udpConn.Close(); err != nil {
+			}
 			s.stopReadRoutine <- struct{}{}
 			s.stopMain <- struct{}{}
 			s.closeFunctionCallRes <- struct{}{}
