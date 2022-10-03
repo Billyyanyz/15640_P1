@@ -43,7 +43,6 @@ type server struct {
 	closeFunctionCallRes chan struct{}
 	pendingClose         bool
 	serverClosed         bool
-	stopReadRoutine      chan struct{}
 	stopMain             chan struct{}
 }
 
@@ -118,8 +117,7 @@ func NewServer(port int, params *Params) (Server, error) {
 		closeFunctionCallRes: make(chan struct{}),
 		pendingClose:         false,
 		serverClosed:         false,
-		stopReadRoutine:      make(chan struct{}),
-		stopMain:             make(chan struct{}),
+		stopMain:             make(chan struct{}, 1),
 	}
 	var addr *lspnet.UDPAddr
 	var err error
@@ -139,29 +137,24 @@ func NewServer(port int, params *Params) (Server, error) {
 
 func (s *server) ReadRoutine() {
 	for {
-		select {
-		case <-s.stopReadRoutine:
+		b := make([]byte, 2048)
+		n, addr, err := s.udpConn.ReadFromUDP(b)
+		if err != nil {
 			return
-		default:
-			b := make([]byte, 2048)
-			n, addr, err := s.udpConn.ReadFromUDP(b)
-			if err != nil {
-				return
-			}
-			var m Message
-			if err = json.Unmarshal(b[:n], &m); err != nil {
-				continue
-			}
-			switch m.Type {
-			case MsgConnect:
-				s.newClientConnecting <- messageWithAddress{&m, addr}
-			case MsgAck:
-				s.newAck <- &m
-			case MsgCAck:
-				s.newCAck <- &m
-			case MsgData:
-				s.newDataReceiving <- &m
-			}
+		}
+		var m Message
+		if err = json.Unmarshal(b[:n], &m); err != nil {
+			continue
+		}
+		switch m.Type {
+		case MsgConnect:
+			s.newClientConnecting <- messageWithAddress{&m, addr}
+		case MsgAck:
+			s.newAck <- &m
+		case MsgCAck:
+			s.newCAck <- &m
+		case MsgData:
+			s.newDataReceiving <- &m
 		}
 	}
 }
@@ -377,13 +370,10 @@ func (s *server) attemptClosingServer() {
 	if emptyPending {
 		s.pendingClose = false
 		s.serverClosed = true
-		go func() {
-			if err := s.udpConn.Close(); err != nil {
-			}
-			s.stopReadRoutine <- struct{}{}
-			s.stopMain <- struct{}{}
-			s.closeFunctionCallRes <- struct{}{}
-		}()
+		if err := s.udpConn.Close(); err != nil {
+		}
+		s.stopMain <- struct{}{}
+		s.closeFunctionCallRes <- struct{}{}
 	}
 }
 
