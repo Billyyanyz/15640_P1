@@ -116,7 +116,6 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 		pauseReading:      make(chan struct{}),
 		restartReading:    make(chan struct{}),
 
-		// readFunctionCall:     make(chan struct{}),
 		readMessageGeneral:   make(chan MessageError),
 		readFunctionCallRes:  make(chan *PayloadError),
 		writeFunctionCall:    make(chan []byte, 1),
@@ -521,9 +520,7 @@ func (c *client) Write(payload []byte) error {
 }
 
 func (c *client) Close() error {
-	// go func() {
 	c.closeFunctionCall <- struct{}{}
 	<-c.closeFunctionCallRes
-	// }()
 	return nil
 }
