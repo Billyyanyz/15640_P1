@@ -105,7 +105,7 @@ func (w *slidingWindowSender) cackMessage(sn int) {
 }
 
 func (w *slidingWindowSender) empty() bool {
-	return len(w.unAckedList) == 0
+	return (len(w.unAckedList) == 0 && len(w.unsentData) == 0)
 }
 
 func (w *slidingWindowSender) resendMessageList(epochCnt int) []*Message {

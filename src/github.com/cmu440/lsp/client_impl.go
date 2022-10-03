@@ -260,9 +260,6 @@ func (c *client) MainRoutine() {
 			err := c.handleWriteFunctionCall(payload)
 			c.writeFunctionCallRes <- err
 		case <-c.epochTimer.C:
-			if c.state == CSClosing {
-				continue
-			}
 			success := c.clientEpochTick()
 			if !success {
 				c.udpConn.Close()
@@ -425,6 +422,7 @@ func (c *client) ReadRoutine() {
 	readRoutineState := CSInit
 	for {
 		if readRoutineState == CSClosed {
+			clientImplFatal("ReadRoutine quiting")
 			return
 		}
 
