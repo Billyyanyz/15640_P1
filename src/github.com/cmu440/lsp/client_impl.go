@@ -17,6 +17,7 @@ const (
 	CSInit ClientState = iota
 	CSConnected
 	CSClosing
+	CSClosed
 )
 
 const (
@@ -57,6 +58,10 @@ type client struct {
 	epochTimer     *time.Ticker
 	epochSinceLast int
 	sentState      bool // Any message sent last epoch?
+
+	// For closing operation
+	closeFunctionCall chan struct{}
+	readFunctionAlive bool
 }
 
 type PayloadError struct {
@@ -121,6 +126,9 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 			time.Duration(params.EpochMillis)),
 		epochSinceLast: 0,
 		sentState:      false,
+
+		closeFunctionCall: make(chan struct{}),
+		readFunctionAlive: true,
 	}
 
 	go c.MainRoutine()
@@ -175,20 +183,46 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 	return c, nil
 }
 
+// fullyClose should operate only when the state becomes CSClosed and all the
+// UDP networks are closed. It writes all the remaining data read from the
+// server, if in order, back to the user.
+func (c *client) readLingeringMessages() {
+	if c.state != CSClosed {
+		panic("Connection not closed yet!")
+	}
+	c.stopReadRoutine <- struct{}{}
+	for {
+		<-c.readFunctionCall
+		me, found := c.receivedMessages[c.readSeqNum+1]
+		if !found {
+			c.readFunctionCallRes <- &PayloadError{
+				nil,
+				errors.New("Connection closed"),
+			}
+			return
+		} else {
+			delete(c.receivedMessages, c.readSeqNum+1)
+			c.readSeqNum++
+			c.readFunctionCallRes <- &PayloadError{
+				me.message.Payload,
+				me.err,
+			}
+		}
+	}
+}
+
 func (c *client) MainRoutine() {
+	defer c.readLingeringMessages()
 	for {
 		select {
-		case <-c.stopMainRoutine:
-			if c.state == CSClosing {
-				return
-			} else {
-				c.state = CSClosing
-				return
-			}
+		case <-c.closeFunctionCall:
+			c.state = CSClosed
+			return
 		case me := <-c.readMessageGeneral:
 			ret := c.processReceivedMsg(&me)
 			if ret == -EFATAL {
 				c.udpConn.Close()
+				c.state = CSClosed
 				return
 			}
 		case <-c.readFunctionCall:
@@ -205,6 +239,9 @@ func (c *client) MainRoutine() {
 				c.await = false
 			}
 		case payload := <-c.writeFunctionCall:
+			if c.state > CSConnected {
+				panic("Write() after Close()!")
+			}
 			seqNum := c.sw.getSeqNum()
 			writeSize := len(payload)
 			checkSum := CalculateChecksum(
@@ -227,6 +264,7 @@ func (c *client) MainRoutine() {
 			success := c.clientEpochTick()
 			if !success {
 				c.udpConn.Close()
+				c.state = CSClosed
 				return
 			}
 		}
@@ -242,7 +280,7 @@ func (c *client) processReceivedMsg(me *MessageError) int {
 	if message == nil && err != nil {
 		if c.state == CSInit {
 			// Connection not established, client waits for server
-			// util timeout
+			// until timeout
 			clientImplFatal("Error processing msg: " + err.Error())
 			return -EAGAIN
 		} else {
@@ -254,12 +292,11 @@ func (c *client) processReceivedMsg(me *MessageError) int {
 	c.epochSinceLast = 0
 	switch message.Type {
 	case MsgConnect:
-		clientImplFatal("Client receives connect message!")
-		return EFATAL
+		panic("Client received MsgConnect!")
 	case MsgData:
 		clientImplLog("Reading data message: " + message.String())
 		if !c.ensureDataValidity(message) {
-			clientImplLog("Corrupted data message, discarding...: " +
+			clientImplLog("Discarding corrupted data message: " +
 				message.String())
 			// Deal as if it succeeded
 			return 0
@@ -278,7 +315,8 @@ func (c *client) processReceivedMsg(me *MessageError) int {
 		writeMsg := NewAck(message.ConnID, message.SeqNum)
 		err := c.sendMessage(writeMsg)
 		if err != nil {
-			clientImplFatal("Error sending Ack to server: " + writeMsg.String())
+			clientImplFatal("Error sending Ack to server: " +
+				writeMsg.String())
 			return -EFATAL
 		}
 	case MsgAck:
@@ -297,7 +335,8 @@ func (c *client) processReceivedMsg(me *MessageError) int {
 		c.sw.ackMessage(message.SeqNum)
 		err := c.sendMessagefromSW(c.epochCnt)
 		if err != nil {
-			clientImplFatal("Failed after receiving Ack: " + message.String())
+			clientImplFatal("Failed after receiving Ack: " +
+				message.String())
 			return -EFATAL
 		}
 	case MsgCAck:
@@ -311,7 +350,8 @@ func (c *client) processReceivedMsg(me *MessageError) int {
 		c.sw.cackMessage(message.SeqNum)
 		err := c.sendMessagefromSW(c.epochCnt)
 		if err != nil {
-			clientImplFatal("Failed after receiving CAck: " + message.String())
+			clientImplFatal("Failed after receiving CAck: " +
+				message.String())
 			return -EFATAL
 		}
 	}
@@ -337,7 +377,8 @@ func (c *client) clientEpochTick() bool {
 		writeMsg := NewAck(c.connID, 0)
 		err := c.sendMessage(writeMsg)
 		if err != nil {
-			clientImplFatal("Error heartbeating to server: " + writeMsg.String())
+			clientImplFatal("Error heartbeating to server: " +
+				writeMsg.String())
 			return false
 		}
 	}
@@ -368,29 +409,52 @@ func (c *client) ensureDataValidity(m *Message) bool {
 }
 
 func (c *client) ReadRoutine() {
+	readRoutineState := CSInit
 	for {
 		select {
 		case <-c.stopReadRoutine:
 			// We are sure udpConn is closed
+			readRoutineState = CSClosed
+			clientImplFatal("ReadRoutine receives stop signal")
 			return
 		default:
-			rawMsg := make([]byte, 2048)
-			var me MessageError
-			me.message = nil
-			n, _, err := c.udpConn.ReadFromUDP(rawMsg)
-			if err != nil {
-				clientImplFatal("Error reading from UDP: " + err.Error())
-				me.err = err
-			} else {
-				err = json.Unmarshal(rawMsg[:n], &me.message)
-				if err != nil {
-					clientImplFatal("Error Unmarshal: " + err.Error())
-					me.err = err
-				}
+			if readRoutineState == CSClosed {
+				continue
 			}
-			c.readMessageGeneral <- me
+
+			me := c.readMessageUDP()
+
+			// Read but don't block when connection is closing
+			if readRoutineState == CSInit && me.err == nil {
+				readRoutineState = CSConnected
+			}
+			if readRoutineState > CSInit && me.err != nil {
+				readRoutineState = CSClosed
+			}
+			if readRoutineState == CSConnected ||
+			   readRoutineState == CSClosing {
+				c.readMessageGeneral <- me
+			}
 		}
 	}
+}
+
+func (c *client) readMessageUDP() MessageError {
+	rawMsg := make([]byte, 2048)
+	var me MessageError
+	me.message = nil
+	n, _, err := c.udpConn.ReadFromUDP(rawMsg)
+	if err != nil {
+		clientImplFatal("Error reading from UDP: " + err.Error())
+		me.err = err
+	} else {
+		err = json.Unmarshal(rawMsg[:n], &me.message)
+		if err != nil {
+			clientImplFatal("Error Unmarshal: " + err.Error())
+			me.err = err
+		}
+	}
+	return me
 }
 
 func (c *client) sendMessagefromSW(epoch int) error {
@@ -438,9 +502,16 @@ func (c *client) ConnID() int {
 }
 
 func (c *client) Read() ([]byte, error) {
-	c.readFunctionCall <- struct{}{}
-	pe := <-c.readFunctionCallRes
-	return pe.payload, pe.err
+	if c.readFunctionAlive {
+		c.readFunctionCall <- struct{}{}
+		pe := <-c.readFunctionCallRes
+		if pe.err != nil {
+			c.readFunctionAlive = false
+		}
+		return pe.payload, pe.err
+	} else {
+		return nil, errors.New("Connection closed")
+	}
 }
 
 func (c *client) Write(payload []byte) error {
@@ -450,8 +521,7 @@ func (c *client) Write(payload []byte) error {
 
 func (c *client) Close() error {
 	go func() {
-		c.stopReadRoutine <- struct{}{}
-		c.stopMainRoutine <- struct{}{}
+		c.closeFunctionCall <- struct{}{}
 		c.udpConn.Close()
 	}()
 	return nil
