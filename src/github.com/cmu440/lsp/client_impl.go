@@ -47,7 +47,6 @@ type client struct {
 	pauseReading      chan struct{}
 	restartReading    chan struct{}
 
-	readFunctionCall     chan struct{}
 	readMessageGeneral   chan MessageError
 	readFunctionCallRes  chan *PayloadError
 	writeFunctionCall    chan []byte
@@ -115,7 +114,7 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 		pauseReading:      make(chan struct{}),
 		restartReading:    make(chan struct{}),
 
-		readFunctionCall:     make(chan struct{}),
+		// readFunctionCall:     make(chan struct{}),
 		readMessageGeneral:   make(chan MessageError),
 		readFunctionCallRes:  make(chan *PayloadError),
 		writeFunctionCall:    make(chan []byte, 1),
@@ -179,7 +178,6 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 		params.MaxBackOffInterval)
 	c.sw = sw
 
-	// go c.WriteRoutine()
 	return c, nil
 }
 
@@ -190,9 +188,7 @@ func (c *client) readLingeringMessages() {
 	if c.state != CSClosed {
 		panic("Connection not closed yet!")
 	}
-	c.stopReadRoutine <- struct{}{}
 	for {
-		<-c.readFunctionCall
 		me, found := c.receivedMessages[c.readSeqNum+1]
 		if !found {
 			c.readFunctionCallRes <- &PayloadError{
@@ -214,6 +210,17 @@ func (c *client) readLingeringMessages() {
 func (c *client) MainRoutine() {
 	defer c.readLingeringMessages()
 	for {
+		var readFunctionChan chan *PayloadError
+		var pe *PayloadError
+
+		meTemp, found := c.receivedMessages[c.readSeqNum+1]
+		if !found {
+			readFunctionChan = nil
+		} else {
+			readFunctionChan = c.readFunctionCallRes
+			pe = &PayloadError{meTemp.message.Payload, meTemp.err}
+		}
+
 		select {
 		case <-c.closeFunctionCall:
 			c.state = CSClosed
@@ -225,40 +232,14 @@ func (c *client) MainRoutine() {
 				c.state = CSClosed
 				return
 			}
-		case <-c.readFunctionCall:
-			me, found := c.receivedMessages[c.readSeqNum+1]
-			if !found {
-				c.await = true
-			} else {
-				delete(c.receivedMessages, c.readSeqNum+1)
-				c.readSeqNum++
-				c.readFunctionCallRes <- &PayloadError{
-					me.message.Payload,
-					me.err,
-				}
-				c.await = false
-			}
+		case readFunctionChan <- pe:
+			delete(c.receivedMessages, c.readSeqNum+1)
+			c.readSeqNum++
 		case payload := <-c.writeFunctionCall:
 			if c.state > CSConnected {
 				panic("Write() after Close()!")
 			}
-			seqNum := c.sw.getSeqNum()
-			writeSize := len(payload)
-			checkSum := CalculateChecksum(
-				c.connID,
-				seqNum,
-				writeSize,
-				payload)
-			writeMsg := NewData(
-				c.connID,
-				seqNum,
-				writeSize,
-				payload,
-				checkSum)
-			clientImplLog("Backing up message: " +
-				string(writeMsg.String()))
-			c.sw.backupUnsentMsg(writeMsg)
-			err := c.sendMessagefromSW(c.epochCnt)
+			err := c.handleWriteFunctionCall(payload)
 			c.writeFunctionCallRes <- err
 		case <-c.epochTimer.C:
 			success := c.clientEpochTick()
@@ -269,6 +250,16 @@ func (c *client) MainRoutine() {
 			}
 		}
 	}
+}
+
+func (c *client) handleWriteFunctionCall(payload []byte) error {
+	seqNum := c.sw.getSeqNum()
+	writeSize := len(payload)
+	checkSum := CalculateChecksum(c.connID, seqNum, writeSize, payload)
+	writeMsg := NewData(c.connID, seqNum, writeSize, payload, checkSum)
+	clientImplLog("Backing up message: " + string(writeMsg.String()))
+	c.sw.backupUnsentMsg(writeMsg)
+	return c.sendMessagefromSW(c.epochCnt)
 }
 
 // Process a message received from client ReadRoutine
@@ -302,16 +293,6 @@ func (c *client) processReceivedMsg(me *MessageError) int {
 			return 0
 		}
 		c.receivedMessages[message.SeqNum] = *me
-		me, found := c.receivedMessages[c.readSeqNum+1]
-		if c.await && found {
-			delete(c.receivedMessages, c.readSeqNum+1)
-			c.readSeqNum++
-			c.readFunctionCallRes <- &PayloadError{
-				me.message.Payload,
-				me.err,
-			}
-			c.await = false
-		}
 		writeMsg := NewAck(message.ConnID, message.SeqNum)
 		err := c.sendMessage(writeMsg)
 		if err != nil {
@@ -419,12 +400,11 @@ func (c *client) ReadRoutine() {
 			return
 		default:
 			if readRoutineState == CSClosed {
-				continue
+				return
 			}
 
 			me := c.readMessageUDP()
 
-			// Read but don't block when connection is closing
 			if readRoutineState == CSInit && me.err == nil {
 				readRoutineState = CSConnected
 			}
@@ -503,7 +483,6 @@ func (c *client) ConnID() int {
 
 func (c *client) Read() ([]byte, error) {
 	if c.readFunctionAlive {
-		c.readFunctionCall <- struct{}{}
 		pe := <-c.readFunctionCallRes
 		if pe.err != nil {
 			c.readFunctionAlive = false
