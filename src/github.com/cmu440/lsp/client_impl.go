@@ -59,8 +59,10 @@ type client struct {
 	sentState      bool // Any message sent last epoch?
 
 	// For closing operation
-	closeFunctionCall chan struct{}
-	readFunctionAlive bool
+	closeFunctionCall    chan struct{}
+	closeFunctionCallRes chan struct{}
+	readFunctionAlive    bool
+	notifyCloseCaller    bool
 }
 
 type PayloadError struct {
@@ -126,8 +128,10 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 		epochSinceLast: 0,
 		sentState:      false,
 
-		closeFunctionCall: make(chan struct{}),
-		readFunctionAlive: true,
+		closeFunctionCall:    make(chan struct{}),
+		closeFunctionCallRes: make(chan struct{}),
+		readFunctionAlive:    true,
+		notifyCloseCaller:    false,
 	}
 
 	go c.MainRoutine()
@@ -188,6 +192,9 @@ func (c *client) readLingeringMessages() {
 	if c.state != CSClosed {
 		panic("Connection not closed yet!")
 	}
+	if c.notifyCloseCaller {
+		c.closeFunctionCallRes <- struct{}{}
+	}
 	for {
 		me, found := c.receivedMessages[c.readSeqNum+1]
 		if !found {
@@ -214,17 +221,21 @@ func (c *client) MainRoutine() {
 		var pe *PayloadError
 
 		meTemp, found := c.receivedMessages[c.readSeqNum+1]
-		if !found {
+		if !found || c.state >= CSClosing {
 			readFunctionChan = nil
 		} else {
 			readFunctionChan = c.readFunctionCallRes
 			pe = &PayloadError{meTemp.message.Payload, meTemp.err}
 		}
 
+		if c.state == CSClosed {
+			c.udpConn.Close()
+			return
+		}
+
 		select {
 		case <-c.closeFunctionCall:
-			c.state = CSClosed
-			return
+			c.state = CSClosing
 		case me := <-c.readMessageGeneral:
 			ret := c.processReceivedMsg(&me)
 			if ret == -EFATAL {
@@ -236,12 +247,15 @@ func (c *client) MainRoutine() {
 			delete(c.receivedMessages, c.readSeqNum+1)
 			c.readSeqNum++
 		case payload := <-c.writeFunctionCall:
-			if c.state > CSConnected {
+			if c.state >= CSClosing {
 				panic("Write() after Close()!")
 			}
 			err := c.handleWriteFunctionCall(payload)
 			c.writeFunctionCallRes <- err
 		case <-c.epochTimer.C:
+			if c.state == CSClosing {
+				continue
+			}
 			success := c.clientEpochTick()
 			if !success {
 				c.udpConn.Close()
@@ -285,6 +299,9 @@ func (c *client) processReceivedMsg(me *MessageError) int {
 	case MsgConnect:
 		panic("Client received MsgConnect!")
 	case MsgData:
+		if c.state == CSClosing {
+			return 0
+		}
 		clientImplLog("Reading data message: " + message.String())
 		if !c.ensureDataValidity(message) {
 			clientImplLog("Discarding corrupted data message: " +
@@ -314,6 +331,11 @@ func (c *client) processReceivedMsg(me *MessageError) int {
 			return 0
 		}
 		c.sw.ackMessage(message.SeqNum)
+		if c.state == CSClosing && c.sw.empty() {
+			c.state = CSClosed
+			c.notifyCloseCaller = true
+			return 0
+		}
 		err := c.sendMessagefromSW(c.epochCnt)
 		if err != nil {
 			clientImplFatal("Failed after receiving Ack: " +
@@ -329,6 +351,11 @@ func (c *client) processReceivedMsg(me *MessageError) int {
 			return 0
 		}
 		c.sw.cackMessage(message.SeqNum)
+		if c.state == CSClosing && c.sw.empty() {
+			c.state = CSClosed
+			c.notifyCloseCaller = true
+			return 0
+		}
 		err := c.sendMessagefromSW(c.epochCnt)
 		if err != nil {
 			clientImplFatal("Failed after receiving CAck: " +
@@ -493,7 +520,7 @@ func (c *client) Write(payload []byte) error {
 func (c *client) Close() error {
 	go func() {
 		c.closeFunctionCall <- struct{}{}
-		c.udpConn.Close()
+		<-c.closeFunctionCallRes
 	}()
 	return nil
 }
