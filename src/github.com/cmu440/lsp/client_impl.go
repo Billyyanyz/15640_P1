@@ -392,29 +392,21 @@ func (c *client) ensureDataValidity(m *Message) bool {
 func (c *client) ReadRoutine() {
 	readRoutineState := CSInit
 	for {
-		select {
-		case <-c.stopReadRoutine:
-			// We are sure udpConn is closed
-			readRoutineState = CSClosed
-			clientImplFatal("ReadRoutine receives stop signal")
+		if readRoutineState == CSClosed {
 			return
-		default:
-			if readRoutineState == CSClosed {
-				return
-			}
+		}
 
-			me := c.readMessageUDP()
+		me := c.readMessageUDP()
 
-			if readRoutineState == CSInit && me.err == nil {
-				readRoutineState = CSConnected
-			}
-			if readRoutineState > CSInit && me.err != nil {
-				readRoutineState = CSClosed
-			}
-			if readRoutineState == CSConnected ||
-			   readRoutineState == CSClosing {
-				c.readMessageGeneral <- me
-			}
+		if readRoutineState == CSInit && me.err == nil {
+			readRoutineState = CSConnected
+		}
+		if readRoutineState > CSInit && me.err != nil {
+			readRoutineState = CSClosed
+		}
+		if readRoutineState == CSConnected ||
+			readRoutineState == CSClosing {
+			c.readMessageGeneral <- me
 		}
 	}
 }
