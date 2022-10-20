@@ -41,7 +41,7 @@ func newClientRequestStatus(msg string, maxNonce uint64) clientRequestStatus {
 		waitList:     chunkList(maxNonce),
 		finishedCnt:  0,
 		minHash:      math.MaxUint64,
-		minHashNonce: -1,
+		minHashNonce: 0,
 	}
 }
 
@@ -168,8 +168,14 @@ func main() {
 						fmt.Println(err)
 						continue
 					}
-					srv.lspServer.Write(cID, pres)
-					srv.lspServer.CloseConn(cID)
+					if err := srv.lspServer.Write(cID, pres); err != nil {
+						fmt.Println(err)
+						continue
+					}
+					if err := srv.lspServer.CloseConn(cID); err != nil {
+						fmt.Println(err)
+						continue
+					}
 					delete(srv.clientRequests, cID)
 				}
 
@@ -232,8 +238,8 @@ func (srv server) assignTasks() {
 		chunkAvail, work := srv.getNextChunk()
 		minerAvail, miner := srv.getNextMiner()
 		if chunkAvail && minerAvail {
-			l := work.maxNonce / CHUNKSIZE * CHUNKSIZE
-			req := bitcoin.NewRequest(srv.clientRequests[work.clientID].msg, l, work.maxNonce)
+			minNonce := work.maxNonce / CHUNKSIZE * CHUNKSIZE
+			req := bitcoin.NewRequest(srv.clientRequests[work.clientID].msg, minNonce, work.maxNonce)
 			pReq, err := json.Marshal(req)
 			if err != nil {
 				fmt.Println(err)

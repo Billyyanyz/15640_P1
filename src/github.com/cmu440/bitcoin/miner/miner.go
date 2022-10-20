@@ -1,7 +1,9 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"github.com/cmu440/bitcoin"
 	"log"
 	"math"
 	"math/rand"
@@ -17,9 +19,23 @@ func joinWithServer(hostport string) (lsp.Client, error) {
 	seed := rand.NewSource(time.Now().UnixNano())
 	isn := rand.New(seed).Intn(int(math.Pow(2, 8)))
 
-	// TODO: implement this!
+	c, err := lsp.NewClient(hostport, isn, lsp.NewParams())
+	if err != nil {
+		fmt.Println(err)
+		return nil, err
+	}
+	j := bitcoin.NewJoin()
+	pj, err := json.Marshal(j)
+	if err != nil {
+		fmt.Println(err)
+		return nil, err
+	}
+	if err := c.Write(pj); err != nil {
+		fmt.Println(err)
+		return nil, err
+	}
 
-	return nil, nil
+	return c, nil
 }
 
 var LOGF *log.Logger
@@ -51,7 +67,49 @@ func main() {
 		return
 	}
 
-	defer miner.Close()
+	defer func(miner lsp.Client) {
+		err := miner.Close()
+		if err != nil {
+			fmt.Println(err)
+		}
+	}(miner)
 
-	// TODO: implement this!
+	for {
+		pm, err := miner.Read()
+		if err != nil {
+			return
+		} else {
+			var m bitcoin.Message
+			if err := json.Unmarshal(pm, &m); err != nil {
+				fmt.Println(err)
+				continue
+			}
+			switch m.Type {
+			case bitcoin.Request:
+				minHash := uint64(math.MaxUint64)
+				minHashNonce := uint64(0)
+				for i := m.Lower; i <= m.Upper; i++ {
+					h := bitcoin.Hash(m.Data, i)
+					if h < minHash {
+						minHash = h
+						minHashNonce = i
+					}
+				}
+
+				res := bitcoin.NewResult(minHash, minHashNonce)
+				pres, err := json.Marshal(res)
+				if err != nil {
+					fmt.Println(err)
+					continue
+				}
+				if err := miner.Write(pres); err != nil {
+					fmt.Println(err)
+					continue
+				}
+			default:
+				fmt.Println("Miner received invalid message!")
+			}
+		}
+	}
+
 }

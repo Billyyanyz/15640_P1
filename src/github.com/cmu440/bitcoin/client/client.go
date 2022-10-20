@@ -66,7 +66,9 @@ func main() {
 
 	var res bitcoin.Message
 	pres, err := client.Read()
-	// TODO: handle error, i.e. disconnection
+	if err != nil {
+		printDisconnected()
+	}
 	if err := json.Unmarshal(pres, &res); err != nil {
 		fmt.Println(err)
 		return
