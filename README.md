@@ -149,6 +149,21 @@ $HOME/go/bin/client localhost:6060 bradfitz 9999
 Note that you will need to use the `os.Args` variable in your code to access the user-specified
 command line arguments.
 
+### Run Priliminary Tests (Kevin)
+Go to `github.com/cmu440/bitcoin/`, then
+
+```bash
+make install # compile the programs
+make run # run the three things
+make kill # kill the programs and clean the logs
+```
+In another terminal,
+```bash
+tail -f <log_name>.txt
+```
+
+You can change the configuration of the clients and miners in Makefile.
+
 ### Run Sanity Tests
 
 We have provided *basic* tests for your miner and client implementations. Note that passing them does not indicate that your implementation is correct, nor does it mean your code will earn full scores on Gradescope. Extra tests are encouraged before you submit your code.
