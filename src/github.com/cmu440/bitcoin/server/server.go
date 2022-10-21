@@ -3,12 +3,13 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/cmu440/bitcoin"
-	"github.com/cmu440/lsp"
 	"log"
 	"math"
 	"os"
 	"strconv"
+
+	"github.com/cmu440/bitcoin"
+	"github.com/cmu440/lsp"
 )
 
 const CHUNKSIZE uint64 = 10000
@@ -22,8 +23,8 @@ type clientRequestStatus struct {
 	minHashNonce uint64
 }
 
-// list of last elements of a chunk, 0-999=>999, 12000-12588=>12588
-// retrieved x, process (x/1000*1000) to x inclusive
+// list of last elements of a chunk, 0-9999=>9999, 10000-12588=>12588
+// retrieved x, process (x/10000*10000) to x inclusive
 func chunkList(maxNonce uint64) []uint64 {
 	n := maxNonce/CHUNKSIZE + 1
 	chunks := make([]uint64, n)
@@ -34,8 +35,8 @@ func chunkList(maxNonce uint64) []uint64 {
 	return chunks
 }
 
-func newClientRequestStatus(msg string, maxNonce uint64) clientRequestStatus {
-	return clientRequestStatus{
+func newClientRequestStatus(msg string, maxNonce uint64) *clientRequestStatus {
+	return &clientRequestStatus{
 		msg:          msg,
 		maxNonce:     maxNonce,
 		waitList:     chunkList(maxNonce),
@@ -55,7 +56,7 @@ type server struct {
 
 	clients        []int
 	cLoopIdx       int
-	clientRequests map[int]clientRequestStatus // client id - request
+	clientRequests map[int]*clientRequestStatus // client id - request
 
 	freeMiners []int
 	minerWorks map[int]minerWork // miner id - work, cID=-1 => vacant
@@ -66,8 +67,8 @@ func startServer(port int) (*server, error) {
 	return &server{
 		lspServer:      lspServer,
 		clients:        make([]int, 0, 10),
-		cLoopIdx:       -1,
-		clientRequests: make(map[int]clientRequestStatus),
+		cLoopIdx:       0,
+		clientRequests: make(map[int]*clientRequestStatus),
 		freeMiners:     make([]int, 0, 10),
 		minerWorks:     make(map[int]minerWork),
 	}, err
@@ -117,6 +118,7 @@ func main() {
 		c, pm, err := srv.lspServer.Read()
 		if err != nil {
 			if _, ok := srv.clientRequests[c]; ok {
+				LOGF.Printf("client %d disconnected\n", c)
 				delete(srv.clientRequests, c)
 				// client slice delete delayed to task assignation
 			}
@@ -126,6 +128,7 @@ func main() {
 					crs, ok := srv.clientRequests[chunk.clientID]
 					if ok {
 						crs.waitList = append(crs.waitList, chunk.maxNonce)
+						srv.assignTasks()
 					}
 				}
 				delete(srv.minerWorks, c)
@@ -137,6 +140,7 @@ func main() {
 				fmt.Println(err)
 				continue
 			}
+			LOGF.Println(m.String() + " from " + strconv.Itoa(c))
 			switch m.Type {
 			case bitcoin.Join:
 				srv.freeMiners = append(srv.freeMiners, c)
@@ -151,9 +155,16 @@ func main() {
 			case bitcoin.Result:
 				hash := m.Hash
 				nonce := m.Nonce
-				cID := srv.minerWorks[c].clientID
+				chunk, ok := srv.minerWorks[c]
+				if !ok {
+					LOGF.Println(c, srv.minerWorks)
+					continue
+				}
+				cID := chunk.clientID
 				crs, ok := srv.clientRequests[cID]
 				if !ok {
+					LOGF.Printf("clientRequests of client %d not found!\n", cID)
+					LOGF.Println(cID, srv.clientRequests)
 					continue
 				}
 				if hash < crs.minHash {
@@ -161,8 +172,9 @@ func main() {
 					crs.minHashNonce = nonce
 				}
 				crs.finishedCnt++
+				LOGF.Printf("Finished count %d\n", crs.finishedCnt)
 				if crs.finishedCnt == crs.maxNonce/CHUNKSIZE+1 {
-					res := bitcoin.NewResult(crs.minHash, crs.maxNonce)
+					res := bitcoin.NewResult(crs.minHash, crs.minHashNonce)
 					pres, err := json.Marshal(res)
 					if err != nil {
 						fmt.Println(err)
@@ -180,14 +192,17 @@ func main() {
 				}
 
 				srv.minerWorks[c] = minerWork{-1, 0}
+				srv.logFreeMiners()
 				srv.freeMiners = append(srv.freeMiners, c)
+				srv.logFreeMiners()
 				srv.assignTasks()
+				srv.logFreeMiners()
 			}
 		}
 	}
 }
 
-func (srv server) getNextChunk() (avail bool, chunk minerWork) {
+func (srv *server) getNextChunk() (avail bool, chunk minerWork) {
 	emptyWaitListTracker := make(map[int]struct{})
 	for {
 		if len(srv.clients) == 0 {
@@ -208,8 +223,8 @@ func (srv server) getNextChunk() (avail bool, chunk minerWork) {
 		} else {
 			if len(cReq.waitList) != 0 {
 				chunk = minerWork{cID, cReq.waitList[len(cReq.waitList)-1]}
-				cReq.waitList = cReq.waitList[:len(cReq.waitList)-1]
-				srv.cLoopIdx = (srv.cLoopIdx + 1) % len(srv.clients)
+				// cReq.waitList = cReq.waitList[:len(cReq.waitList)-1]
+				// srv.cLoopIdx = (srv.cLoopIdx + 1) % len(srv.clients)
 				return true, chunk
 			} else {
 				emptyWaitListTracker[cID] = struct{}{}
@@ -219,35 +234,56 @@ func (srv server) getNextChunk() (avail bool, chunk minerWork) {
 	}
 }
 
-func (srv server) getNextMiner() (avail bool, miner int) {
+func (srv *server) getNextMiner() (avail bool, miner int) {
 	for {
 		if len(srv.freeMiners) == 0 {
 			return false, -1
 		}
 		miner = srv.freeMiners[len(srv.freeMiners)-1]
-		srv.freeMiners = srv.freeMiners[:len(srv.freeMiners)-1]
+		// srv.freeMiners = srv.freeMiners[:len(srv.freeMiners)-1]
 		if _, ok := srv.minerWorks[miner]; ok {
 			return true, miner
+		} else {
+			srv.freeMiners = srv.freeMiners[:len(srv.freeMiners)-1]
 		}
 	}
 
 }
 
-func (srv server) assignTasks() {
+func (srv *server) assignTasks() {
+	LOGF.Println("====assignTasks()====")
+	defer LOGF.Println("====end assignTasks()====")
 	for {
 		chunkAvail, work := srv.getNextChunk()
 		minerAvail, miner := srv.getNextMiner()
+		LOGF.Println(chunkAvail, work)
+		LOGF.Println(minerAvail, miner)
 		if chunkAvail && minerAvail {
+			// Remove from free miner list
+			srv.freeMiners = srv.freeMiners[:len(srv.freeMiners)-1]
+			cReq := srv.clientRequests[work.clientID]
+			cReq.waitList = cReq.waitList[:len(cReq.waitList)-1]
+			srv.cLoopIdx = (srv.cLoopIdx + 1) % len(srv.clients)
+			srv.logFreeMiners()
+
+			srv.minerWorks[miner] = work
 			minNonce := work.maxNonce / CHUNKSIZE * CHUNKSIZE
 			req := bitcoin.NewRequest(srv.clientRequests[work.clientID].msg, minNonce, work.maxNonce)
 			pReq, err := json.Marshal(req)
 			if err != nil {
-				fmt.Println(err)
+				LOGF.Fatal(err)
 				return
 			}
-			srv.lspServer.Write(miner, pReq)
+			if err = srv.lspServer.Write(miner, pReq); err != nil {
+				LOGF.Fatal("Error during write: " + err.Error())
+				continue
+			}
 		} else {
 			return
 		}
 	}
+}
+
+func (srv server) logFreeMiners() {
+	LOGF.Printf("freeMiners: " + fmt.Sprint(srv.freeMiners))
 }

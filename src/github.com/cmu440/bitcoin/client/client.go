@@ -3,13 +3,14 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/cmu440/bitcoin"
 	"log"
 	"math"
 	"math/rand"
 	"os"
 	"strconv"
 	"time"
+
+	"github.com/cmu440/bitcoin"
 
 	"github.com/cmu440/lsp"
 )
@@ -68,6 +69,7 @@ func main() {
 	pres, err := client.Read()
 	if err != nil {
 		printDisconnected()
+		return
 	}
 	if err := json.Unmarshal(pres, &res); err != nil {
 		fmt.Println(err)

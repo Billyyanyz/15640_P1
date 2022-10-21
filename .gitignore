@@ -19,3 +19,6 @@
 
 # Shell scripts
 *.sh
+
+# Logs
+*.txt

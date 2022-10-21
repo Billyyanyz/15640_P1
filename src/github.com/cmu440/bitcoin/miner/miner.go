@@ -67,12 +67,7 @@ func main() {
 		return
 	}
 
-	defer func(miner lsp.Client) {
-		err := miner.Close()
-		if err != nil {
-			fmt.Println(err)
-		}
-	}(miner)
+	defer miner.Close()
 
 	for {
 		pm, err := miner.Read()
