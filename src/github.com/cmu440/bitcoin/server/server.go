@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"math"
 	"os"
 	"strconv"
 
@@ -13,43 +12,6 @@ import (
 )
 
 const CHUNKSIZE uint64 = 10000
-
-type clientRequestStatus struct {
-	msg          string
-	maxNonce     uint64
-	waitList     []uint64 // delete when sending work, adding back when miner crash
-	finishedCnt  uint64
-	minHash      uint64
-	minHashNonce uint64
-}
-
-// list of last elements of a chunk, 0-9999=>9999, 10000-12588=>12588
-// retrieved x, process (x/10000*10000) to x inclusive
-func chunkList(maxNonce uint64) []uint64 {
-	n := maxNonce/CHUNKSIZE + 1
-	chunks := make([]uint64, n)
-	for i, _ := range chunks {
-		chunks[i] = CHUNKSIZE - 1 + uint64(i)*CHUNKSIZE
-	}
-	chunks[n-1] = maxNonce
-	return chunks
-}
-
-func newClientRequestStatus(msg string, maxNonce uint64) *clientRequestStatus {
-	return &clientRequestStatus{
-		msg:          msg,
-		maxNonce:     maxNonce,
-		waitList:     chunkList(maxNonce),
-		finishedCnt:  0,
-		minHash:      math.MaxUint64,
-		minHashNonce: 0,
-	}
-}
-
-type minerWork struct {
-	clientID int
-	maxNonce uint64
-}
 
 type server struct {
 	lspServer lsp.Server
