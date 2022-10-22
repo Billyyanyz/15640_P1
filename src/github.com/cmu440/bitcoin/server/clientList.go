@@ -19,7 +19,7 @@ type clientRequestStatus struct {
 func chunkList(maxNonce uint64) []uint64 {
 	n := maxNonce/CHUNKSIZE + 1
 	chunks := make([]uint64, n)
-	for i, _ := range chunks {
+	for i := range chunks {
 		chunks[i] = CHUNKSIZE - 1 + uint64(i)*CHUNKSIZE
 	}
 	chunks[n-1] = maxNonce
@@ -41,6 +41,14 @@ type clientList struct {
 	clients        []int
 	loopIdx        int
 	clientRequests map[int]*clientRequestStatus
+}
+
+func newClientList() clientList {
+	return clientList{
+		clients:        make([]int, 0, 10),
+		loopIdx:        0,
+		clientRequests: make(map[int]*clientRequestStatus),
+	}
 }
 
 func (cl *clientList) add(c int, msg string, maxNonce uint64) {
@@ -90,13 +98,13 @@ func (cl *clientList) checkNext() bool {
 	}
 }
 
-func (cl *clientList) getNext() minerWork {
+func (cl *clientList) getNext() (string, minerWork) {
 	cID := cl.clients[cl.loopIdx]
 	cReq := cl.clientRequests[cID]
 	maxNonce := cReq.waitList[len(cReq.waitList)-1]
 	cReq.waitList = cReq.waitList[:len(cReq.waitList)-1]
 	cl.loopIdx = (cl.loopIdx + 1) % len(cl.clients)
-	return minerWork{cID, maxNonce}
+	return cReq.msg, minerWork{cID, maxNonce}
 }
 
 func (cl *clientList) addBackWork(work minerWork) {

@@ -1,17 +1,6 @@
 package main
 
-import (
-	"encoding/json"
-	"fmt"
-	"log"
-	"os"
-	"strconv"
-
-	"github.com/cmu440/bitcoin"
-	"github.com/cmu440/lsp"
-)
-
-const CHUNKSIZE uint64 = 10000
+/*const CHUNKSIZE uint64 = 10000
 
 type server struct {
 	lspServer lsp.Server
@@ -249,3 +238,4 @@ func (srv *server) assignTasks() {
 func (srv server) logFreeMiners() {
 	LOGF.Printf("freeMiners: " + fmt.Sprint(srv.freeMiners))
 }
+*/

@@ -12,6 +12,13 @@ type minerList struct {
 	minerAssignedWorks map[int]minerWork
 }
 
+func newMinerList() minerList {
+	return minerList{
+		freeMiners:         make([]int, 0, 10),
+		minerAssignedWorks: make(map[int]minerWork),
+	}
+}
+
 func (ml *minerList) add(c int) {
 	if _, ok := ml.minerAssignedWorks[c]; ok {
 		fmt.Println("Adding ", c, " already in miner list!")
@@ -47,7 +54,7 @@ func (ml *minerList) checkNext() bool {
 	return len(ml.freeMiners) != 0
 }
 func (ml *minerList) getNext() int {
-	miner = ml.freeMiners[len(ml.freeMiners)-1]
+	miner := ml.freeMiners[len(ml.freeMiners)-1]
 	ml.freeMiners = ml.freeMiners[:len(ml.freeMiners)-1]
 	return miner
 }
@@ -59,4 +66,11 @@ func (ml *minerList) assignWork(miner int, work minerWork) {
 func (ml *minerList) freeWork(miner int) {
 	ml.minerAssignedWorks[miner] = minerWork{-1, 0}
 	ml.freeMiners = append(ml.freeMiners, miner)
+}
+
+func (ml *minerList) getWorkingClient(c int) int {
+	if ml.check(c) {
+		return ml.minerAssignedWorks[c].clientID
+	}
+	return -1
 }
