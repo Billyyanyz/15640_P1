@@ -382,7 +382,7 @@ func (s *server) Read() (int, []byte, error) {
 	m := <-s.readFunctionCallRes
 	switch m.Type {
 	case MsgAck:
-		return -1, nil, errors.New("connection with client id: " + strconv.Itoa(m.ConnID) + " is closed")
+		return m.ConnID, nil, errors.New("CONNECTION with client id: " + strconv.Itoa(m.ConnID) + " is closed")
 	default:
 		return m.ConnID, m.Payload, nil
 	}

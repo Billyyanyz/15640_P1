@@ -127,7 +127,7 @@ func NewClient(hostport string, initialSeqNum int, params *Params) (Client, erro
 		epochSinceLast: 0,
 		sentState:      false,
 
-		closeFunctionCall:    make(chan struct{}),
+		closeFunctionCall:    make(chan struct{}, 1),
 		closeFunctionCallRes: make(chan struct{}),
 		readFunctionAlive:    true,
 		notifyCloseCaller:    false,
@@ -201,6 +201,8 @@ func (c *client) readLingeringMessages() {
 				nil,
 				errors.New("Connection closed"),
 			}
+			clientImplFatal("Client Completely exiting...")
+			close(c.closeFunctionCallRes)
 			return
 		} else {
 			delete(c.receivedMessages, c.readSeqNum+1)
@@ -507,6 +509,7 @@ func (c *client) Read() ([]byte, error) {
 		pe := <-c.readFunctionCallRes
 		if pe.err != nil {
 			c.readFunctionAlive = false
+			clientImplLog("Error reading: " + pe.err.Error())
 		}
 		return pe.payload, pe.err
 	} else {
