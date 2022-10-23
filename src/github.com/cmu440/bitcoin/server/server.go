@@ -93,10 +93,8 @@ func main() {
 			switch m.Type {
 			case bitcoin.Join:
 				srv.miners.add(c)
-				srv.assignTasks()
 			case bitcoin.Request:
 				srv.clients.add(c, m.Data, m.Upper)
-				srv.assignTasks()
 			case bitcoin.Result:
 				cID := srv.miners.getWorkingClient(c)
 				if cID == -1 {
@@ -122,9 +120,9 @@ func main() {
 					// srv.clients.delete(cID)
 				}
 				srv.miners.freeWork(c)
-				srv.assignTasks()
 			}
 		}
+		srv.assignTasks()
 	}
 }
 
