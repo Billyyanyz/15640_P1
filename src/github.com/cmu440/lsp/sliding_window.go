@@ -56,6 +56,12 @@ func (w *slidingWindowSender) getSeqNum() int {
 	return res
 }
 
+func (w *slidingWindowSender) getSeqNumServer() int {
+	res := w.nextSN
+	w.nextSN++
+	return res
+}
+
 func (w *slidingWindowSender) backupUnsentMsg(m *Message) {
 	w.unsentData[m.SeqNum] = m
 }

@@ -61,7 +61,11 @@ func (ml *minerList) getNext() int {
 }
 
 func (ml *minerList) assignWork(miner int, work minerWork) {
-	ml.minerAssignedWorks[miner] = work
+	if ml.check(miner) {
+		ml.minerAssignedWorks[miner] = work
+	} else {
+		LOGF.Printf("Trying to assign work to client!")
+	}
 }
 
 func (ml *minerList) freeWork(miner int) {

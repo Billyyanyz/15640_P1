@@ -187,8 +187,12 @@ func (s *server) MainRoutine() {
 			}
 
 		case m := <-s.writeFunctionCall:
-			cInfo := s.clientsID[m.ConnID]
-			m.SeqNum = cInfo.slideSndr.getSeqNum()
+			cInfo, ok := s.clientsID[m.ConnID]
+			if !ok {
+				serverImplLog(strconv.Itoa(m.ConnID) + " Not found!")
+				serverImplMapKeys(s.clientsID)
+			}
+			m.SeqNum = cInfo.slideSndr.getSeqNumServer()
 			m.Size = len(m.Payload)
 			m.Checksum = CalculateChecksum(m.ConnID, m.SeqNum, m.Size, m.Payload)
 			cInfo.slideSndr.backupUnsentMsg(m)
@@ -327,6 +331,7 @@ func (s *server) checkConnActivity() {
 		if !cInfo.activeReadFromEpoch {
 			cInfo.lastReadEpoch++
 			if cInfo.lastReadEpoch >= s.params.EpochLimit {
+				serverImplLog("closeClientNow in checkConnActivity")
 				s.closeClientNow(id)
 			}
 		} else {
@@ -348,6 +353,7 @@ func (s *server) resendUnackedMessage() {
 }
 
 func (s *server) closeClientNow(id int) {
+	serverImplLog("closeClientNow " + strconv.Itoa(id))
 	delete(s.clientsAddr, s.clientsID[id].addr.String())
 	delete(s.pendingCloseClients, id)
 	delete(s.clientsID, id)
@@ -382,7 +388,7 @@ func (s *server) Read() (int, []byte, error) {
 	m := <-s.readFunctionCallRes
 	switch m.Type {
 	case MsgAck:
-		return m.ConnID, nil, errors.New("CONNECTION with client id: " + strconv.Itoa(m.ConnID) + " is closed")
+		return m.ConnID, nil, errors.New("Connection with client id: " + strconv.Itoa(m.ConnID) + " is closed")
 	default:
 		return m.ConnID, m.Payload, nil
 	}

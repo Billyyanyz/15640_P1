@@ -2,11 +2,12 @@ package lsp
 
 import (
 	"fmt"
+	"strconv"
 )
 
 const (
-	log   = true
-	fatal = true
+	log   = false
+	fatal = false
 )
 
 // Ref: https://twin.sh/articles/35/how-to-add-colors-to-your-console-terminal-output-in-go
@@ -42,4 +43,12 @@ func serverImplFatal(s string) {
 	if log {
 		fmt.Printf("%s[server_impl] FATAL: %s\n%s", Red, s, Reset)
 	}
+}
+
+func serverImplMapKeys(m map[int]*clientInfo) {
+	var res string
+	for i := range m {
+		res = res + " " + fmt.Sprintf(strconv.Itoa(i))
+	}
+	serverImplLog(res)
 }

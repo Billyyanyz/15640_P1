@@ -71,7 +71,6 @@ func main() {
 	for {
 		c, pm, err := srv.lspServer.Read()
 		if err != nil {
-			LOGF.Println(err.Error())
 			if srv.clients.check(c) {
 				LOGF.Printf("client %d disconnected\n", c)
 				srv.clients.delete(c)
@@ -108,11 +107,8 @@ func main() {
 						fmt.Println(err)
 						continue
 					}
+					LOGF.Printf("Trying to write to client %d", cID)
 					if err := srv.lspServer.Write(cID, pres); err != nil {
-						fmt.Println(err)
-						continue
-					}
-					if err := srv.lspServer.CloseConn(cID); err != nil {
 						fmt.Println(err)
 						continue
 					}
@@ -125,16 +121,11 @@ func main() {
 }
 
 func (srv *server) assignTasks() {
-	LOGF.Println("====assignTasks()====")
-	defer LOGF.Println("====end assignTasks()====")
 	for {
 		if srv.miners.checkNext() && srv.clients.checkNext() {
 			miner := srv.miners.getNext()
-			LOGF.Println("Alive")
 			msg, work := srv.clients.getNext()
-			LOGF.Println("Alive")
 			srv.miners.assignWork(miner, work)
-			LOGF.Println("Alive")
 			minNonce := work.maxNonce / CHUNKSIZE * CHUNKSIZE
 			req := bitcoin.NewRequest(msg, minNonce, work.maxNonce)
 			pReq, err := json.Marshal(req)
@@ -142,12 +133,11 @@ func (srv *server) assignTasks() {
 				LOGF.Println(err)
 				return
 			}
-			LOGF.Println("Alive")
+			LOGF.Printf("Trying to write to miner %d\n", miner)
 			if err = srv.lspServer.Write(miner, pReq); err != nil {
 				LOGF.Println("Error during write: " + err.Error())
 				continue
 			}
-			LOGF.Println("Alive")
 		} else {
 			return
 		}
