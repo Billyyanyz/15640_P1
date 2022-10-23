@@ -54,6 +54,7 @@ func (ml *minerList) checkNext() bool {
 	return len(ml.freeMiners) != 0
 }
 func (ml *minerList) getNext() int {
+	LOGF.Println(len(ml.freeMiners))
 	miner := ml.freeMiners[len(ml.freeMiners)-1]
 	ml.freeMiners = ml.freeMiners[:len(ml.freeMiners)-1]
 	return miner

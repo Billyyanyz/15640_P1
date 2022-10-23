@@ -5,8 +5,8 @@ import (
 )
 
 const (
-	log   = false
-	fatal = false
+	log   = true
+	fatal = true
 )
 
 // Ref: https://twin.sh/articles/35/how-to-add-colors-to-your-console-terminal-output-in-go

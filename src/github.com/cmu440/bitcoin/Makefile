@@ -4,10 +4,10 @@ install:
 	go install ./client
 	go install ./btest
 run:
-	~/go/bin/server 6060 &
+	# ~/go/bin/server 6060 &
 	# ~/go/bin/miner localhost:6060 &
-	~/go/bin/client localhost:6060 bradfitz 99999 &
-	# ~/go/bin/btest
+	# ~/go/bin/client localhost:6060 bradfitz 99999 &
+	~/go/bin/btest
 
 kill:
 	-echo "" > serverLog.txt

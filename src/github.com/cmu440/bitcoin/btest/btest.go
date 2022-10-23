@@ -14,8 +14,8 @@ const (
 	clientArg0 = "/Users/kevin-m1/go/bin/client"
 	addr = "localhost:6060"
 	port = "6060"
-	clientCount = 2
-	minerCount = 2
+	clientCount = 8
+	minerCount = 4
 	maxNonce = "9999"
 )
 
@@ -26,20 +26,9 @@ var (
 )
 
 func main() {
-	// cmd := exec.Command("tr", "a-z", "A-Z")
-
-	// cmd.Stdin = strings.NewReader("some input")
-	// var out bytes.Buffer
-	// cmd.Stdout = &out
-	// err := cmd.Run()
-	// if err != nil {
-	// 	log.Fatal(err)
-	// }
-	// fmt.Printf("in all caps: %q\n", out.String())
-
 	go runServer()
 	go runClient()
-	// go runMiner()
+	go runMiner()
 
 	for {
 		select {
@@ -70,7 +59,7 @@ func runClient() {
 	clientCmd := make([]exec.Cmd, clientCount)
 	clientOut := make([]bytes.Buffer, clientCount)
 
-	allMessages := []string{"bradfitz", "billy"}
+	allMessages := []string{"zero", "one", "two", "three", "four", "five", "six", "seven"}
 
 	for i := 0; i < clientCount; i++ {
 		clientCmd[i] = *exec.Command(clientArg0, addr, allMessages[i], maxNonce)
@@ -105,6 +94,11 @@ func runMiner() {
 		if err != nil {
 			log.Fatal(err)
 		}
+	}
+
+	err := minerCmd[1].Process.Kill()
+	if err != nil {
+		log.Fatal(err)
 	}
 
 	for i := 0; i < minerCount; i++ {
